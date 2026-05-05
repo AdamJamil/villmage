@@ -92,7 +92,7 @@ VRBTM-8:
 
 ### Item Types And Weights
 
-STRCT-21: The game has item types `peach`, `carcass`, `raw meat`, `cooked meat`, `raw hide`, `processed hide`, `log`, `firewood`, `stick`, `leaves`, `cot`, and `bed roll`.
+STRCT-21: The game has item types `peach`, `carcass`, `raw meat`, `cooked meat`, `raw hide`, `processed hide`, `log`, `firewood`, `stick`, `leaves`, `cot`, `bed roll`, and `satchel`.
 
 CONST-22: `peach` weighs `150g`.
 
@@ -118,6 +118,8 @@ CONST-32: `cot` weighs `0kg`.
 
 CONST-33: `bed roll` weighs `0kg`.
 
+CONST-265: `satchel` weighs `0kg`.
+
 ### Storage, Fire, Dirtiness, And Static World Structure
 
 STRCT-75: The only storage is a public storage in base.
@@ -136,9 +138,9 @@ INVR-117: The fire can hold at most `4 hours` of fuel at once.
 
 ### Professions And Static Unlocks
 
-ATTR-37: Crafting, exploration for logs specifically, and cooking are profession-locked.
+ATTR-37: Crafting, log exploration (woodcutter), hunting (hunter), and cooking are profession-locked.
 
-ATTR-140: The crafter profession unlocks the satchel, bedroll, and cot crafting recipes.
+ATTR-140: The crafter profession unlocks the satchel, bed roll, and cot crafting recipes.
 
 ATTR-146: The cooking profession unlocks cooking `raw meat -> cooked meat`.
 
@@ -157,16 +159,16 @@ VRBTM-35:
 Output a JSON with format {"idx": <action index>, "args": {…}} where args are specified per action.
 
 1. Eat peach {"quantity": int (1-27)} [need 20 to be sated]
-2. Eat pork chop {"quantity": int (1-932)} [need 20 to be sated]
-3. Drink pouchful of water (500mL) {"quantity": int (1-20)} [need 2 to be hydrated]
-4. Take item from base {"item": str (pork chop, peaches, …), "quantity": int (porkchop: 1-7, peaches: 1-90, …)}
+2. Eat cooked meat {"quantity": int (1-932)} [need 20 to be sated]
+3. Drink water {"liters": int (1-20)} [need 2 to be hydrated]
+4. Take item from base {"item": str (cooked meat, peaches, …), "quantity": int (cooked meat: 1-7, peaches: 1-90, …)}
 5. …
 
 """
 
 REQ-36: Each action subsection reflects an action that can be taken and when it is legal to take that action.
 
-BHVR-38: When exploring for peaches or meat with a non-matching profession, apply a 4x slower speed modifier.
+BHVR-38: When a non-gatherer explores for peaches, apply a `4x` slower speed modifier.
 
 BHVR-39: Present modified action times using the health work-speed modifier and profession modifier rather than the raw times listed below.
 
@@ -180,8 +182,8 @@ BHVR-77: Villmagers can retrieve items from base storage.
 
 VRBTM-78:
 
-1. Take item from base {"item": str (pork chop, peaches, …), "quantity": int (porkchop: 1-7, peaches: 1-90, …)}
-2. Store item in base {"item": str (pork chop, peaches, …), "quantity": int (porkchop: 1-7, peaches: 1-90, …)}
+1. Take item from base {"item": str (cooked meat, peaches, …), "quantity": int (cooked meat: 1-7, peaches: 1-90, …)}
+2. Store item in base {"item": str (cooked meat, peaches, …), "quantity": int (cooked meat: 1-7, peaches: 1-90, …)}
 
 ### Eating And Drinking
 
@@ -274,6 +276,8 @@ BHVR-115: When consuming fuel for fire-tending actions, prefer inventory fuel be
 
 CONST-116: Each piece of firewood provides `20 minutes` of fire.
 
+CONST-264: Each stick provides `1 minute` of fire.
+
 BHVR-118: Consume placed fuel one unit at a time.
 
 BHVR-119: Extinguishing the fire preserves the remaining fuel.
@@ -294,16 +298,15 @@ VRBTM-123:
     - produces 14 raw meat
     - decreases villmager’s cleanliness by 50
     - costs 200 cal
-- "Clean up the camp (<number of hours> minutes)"
-    - we maintain list of things that are making the camp dirty increase over time and have to be cleaned
+- "Clean up the camp (<current camp dirtiness> minutes)"
 - "Split logs into firewood (10m each) {"quantity": int (1-(logs in base + in inventory))}"
     - 1 log -> 2 firewood
 
 if crafter profession:
 
-- "Craft a satchel {"minutes_to_spend_now": int (60-480)} (increases someone’s carry capacity by 30kg) (requires 8h total)"
+- "Craft a satchel {"minutes_to_spend_now": int (60-480)} (increases holder’s carry capacity by 30kg) (requires 8h total)"
     - costs 1 processed hide, consumed at start
-- bedroll (5h) [same prompt as above]
+- bed roll (5h) [same prompt as above]
     - 1 processed hide
     - 400 leaves
 - cot (16h) [same prompt as above]
@@ -346,9 +349,13 @@ BHVR-138: `Split logs into firewood` converts `1 log` into `2 firewood`.
 
 CONST-139: `Split logs into firewood` takes `10m each`.
 
-CONST-141: `Craft a satchel` requires `8h total`, can be progressed in `60-480` minute increments, increases someone's carry capacity by `30kg`, and consumes `1 processed hide` at the start.
+CONST-141: `Craft a satchel` requires `8h total`, can be progressed in `60-480` minute increments, and consumes `1 processed hide` at the start.
 
-CONST-142: `bedroll` crafting requires `5h`, `1 processed hide`, and `400 leaves`.
+BHVR-266: When a satchel is in a villmager's inventory, their carry capacity is increased by `30kg`.
+
+BHVR-267: Crafted items go directly into the crafter's inventory.
+
+CONST-142: `bed roll` crafting requires `5h`, `1 processed hide`, and `400 leaves`.
 
 CONST-143: `cot` crafting requires `16h`, `5 logs`, `25 sticks`, `4 processed hide`, and `400 leaves`.
 
@@ -379,10 +386,6 @@ CONST-155: Sleep modifier is `1` with a cot, `0.8` with bed roll and fire, `0.65
 BHVR-156: Increase wakefulness by `51/7 * modifier` per hour while sleeping.
 
 CONST-157: A cot restores wakefulness at `51/7` per hour, based on `7` hours for perfect sleep and `51` wakefulness lost from `(24-7)*(3 wakefulness/h)`.
-
-BHVR-158: Sleeping in a bed roll reduces the effects of cold when there is no fire.
-
-BHVR-159: Sleeping in a cot removes the effects of cold entirely.
 
 BHVR-160: Give feedback based on the modifier the villmager gets.
 
@@ -495,11 +498,11 @@ Output {"impression": str (32 tokens), "desc": str (128 tokens)}. Describe what 
 
 ONLY IF YOUR OPINION OF <y.name.to_upper()> HAS CHANGED: include the "desc" field with a *slightly* modified description of <y.name> to replace the existing description. BE EXTREMELY CONCISE. AVOID PARTICLES AND PRIORITIZE INFORMATION DENSITY. e.g.: ‘Hid food from party and lied.’ or ‘Cleaned camp for everyone and didn’t brag.’
 
-BHVR-70: Add the new `impression` to `x`'s 5 most recent impressions of `y`.
+BHVR-70: Add the new `impression` to `x`'s 3 most recent impressions of `y`.
 
 BHVR-71: If a modified `desc` was outputted, replace `x`'s overall relationship description of `y`.
 
-BHVR-73: After a conversation, apply a flat `+20` loneliness update.
+BHVR-73: After a conversation, apply a flat `+20` connectedness update.
 
 BHVR-177: Conversations update social joy directly.
 
@@ -525,7 +528,7 @@ VRBTM-170:
 
 ### Mood
 
-CONST-171: `s` is social joy, `c_n` is loneliness, `c` is cleanliness, `b` is base cleanliness, and `r` is time since last rest in hours; all except `r` are scaled to `0-1`.
+CONST-171: `s` is social joy, `c_n` is connectedness, `c` is cleanliness, `b` is base cleanliness, and `r` is time since last rest in hours; all except `r` are scaled to `0-1`.
 
 CONST-172: Compute mood as `min(1, 0.5 * (0.5s + 0.2c_n + 0.2c + 0.1b) + 0.5 * (s^10 * c_n^4 * c^4 * b^2)^(1/22) + (0.3/5) * max(0, 5-r))`.
 
@@ -615,11 +618,11 @@ VRBTM-194:
 
 ### Satiation And Hydration
 
-CONST-88: Thirst is stored in `mL`.
+CONST-88: Hydration is stored in `mL`.
 
-CONST-89: Hunger is stored in calories.
+CONST-89: Satiation is stored in calories, with a max of 1800 calories.
 
-CONST-197: Satiation drains by `1` per hour.
+CONST-197: Satiation drains by `1%` per hour.
 
 VRBTM-198:
 
@@ -643,9 +646,7 @@ VRBTM-200:
 
 BHVR-201: Recalculate safety each day based on stockpiled food and firewood.
 
-CONST-202: Food safety score is `((days of calories on you) + (1 / remaining villmagers) * calories in base) / 5`.
-
-CONST-203: Assume `2200` calories per day.
+CONST-202: Food safety score is `((calories in inventory) * (2200 calories per day) + (1 / living villmagers) * (calories in base) * (2200 calories per day)) / 5`.
 
 CONST-204: Firewood safety score uses the same structure, but measures amount of firewood needed only for the night across the next `5` days.
 
@@ -719,7 +720,11 @@ VRBTM-257:
 
 NOTE-258: Long-term memory may not be needed for the expected experiment duration.
 
-BHVR-259: Beyond three days, compact memories even further using basically the same prompt as above.
+BHVR-259: Beyond three days, compact all medium-term memories into long-term memories.
+
+VRBTM-270:
+
+"Here are your accumulated memories from prior days: <medium-term memories>. In 256 tokens (~180 words), form an EXTREMELY CONCISE summary of the salient memories you experienced. This will be recorded in the future and the rest will be thrown out. Prioritize information you will use to inform later actions or opinions on others. Prioritize information density and accuracy."
 
 REQ-260: Memory compaction must be extremely aggressive to avoid input-size bloat.
 
@@ -763,9 +768,11 @@ STRCT-234: Base status includes other villmager ongoing actions, cleanliness, di
 
 STRCT-235: The villmager prompt includes villmager info.
 
-STRCT-236: Villmager info includes all status descriptions and inventory.
+STRCT-236: Villmager info includes inventory and status descriptions.
 
-NOTE-237: `all status descriptions` needs to be expanded after status stuff is set in stone.
+BHVR-268: Collect status descriptions as a set (deduplicating entries). Always include well-being, mood, health, and safety. Also include the highest-partial-derivative subcomponent of mood and the highest-partial-derivative subcomponent of health.
+
+BHVR-269: Additionally include satiation if below `90`, hydration if below `50`, and wakefulness if below `50`.
 
 STRCT-239: The villmager prompt includes each available action with its time, args, and whatever else is needed.
 
@@ -779,7 +786,7 @@ STRCT-241: The villmager prompt always includes a timestamp.
 
 REQ-215: Adaptively buff or nerf satiation restoration, hydration restoration, and exploration yield based on how well villmagers are doing in related areas.
 
-CONST-216: Target average hunger is `85`.
+CONST-216: Target average satiation is `85`.
 
 CONST-217: Target hydration is `50`.
 
@@ -813,52 +820,8 @@ ATTR-17: Timestamps are visible in the log.
 
 REQ-18: Persist only updates, not full snapshots for every moment.
 
-NOTE-19: Maybe checkpoint current state every few in-game hours to balance between bugs causing drift in current state and size bloat of the actual log.
+BHVR-271: Checkpoint the full simulation state every `3` in-game hours.
+
+REQ-272: Support restarting the simulation from any checkpoint.
 
 ## 11. Flags And Unresolved Ambiguities
-
-FLAG-20: Checkpointing is explicitly tentative: `maybe some kind of checkpointing for current state every few in game hours`.
-
-FLAG-40: This overview sample uses `pork chop`, `porkchop`, and `Drink pouchful of water (500mL)`, but the item list and later action sections define `cooked meat` and `Drink water` in liters; the canonical item/action names and units are inconsistent.
-
-FLAG-41: `exploration (for logs specifically)` is ambiguous against the later exploration section; it is unclear whether only exploring for logs is profession-locked or whether more exploration options are meant to be gated.
-
-FLAG-56: The text says each turn all characters will be asked to pick an action, but it also says only the initiating villmager goes on the first turn and other inputs are thrown out; the exact per-turn query/selection flow is unclear.
-
-FLAG-72: This section stores `5` most recent impressions, but the later `## relationships` section says each villmager retains `3` most recent impressions and budgets tokens accordingly.
-
-FLAG-74: The target stat is unclear: the state model later defines `social joy` and `connectedness`, but no standalone `loneliness` stat section exists even though mood uses a `loneliness` variable.
-
-FLAG-91: This section says eating and drinking happen from inventory when in base, but water is consumed from base and cannot enter inventory; confirm whether `from your inventory` applies only to food.
-
-FLAG-98: This placement flow overlaps with the later sleeping section, which separately exposes `Place down <bed roll/cot> and claim as yours permanently.`; it is unclear whether these are the same action or two distinct entry points.
-
-FLAG-108: The prompt uses `duration_minutes: int (60-240)`, but one listed resource has mean time `30s` and another has mean time `20h`; the spec does not say exactly how chosen duration interacts with these mean times.
-
-FLAG-120: Sticks are said to be inefficient fire fuel, but no burn-time value or conversion rate for sticks is defined.
-
-FLAG-148: `Clean up the camp (<number of hours> minutes)` mixes hours and minutes in the same placeholder and does not specify the actual allowed input format.
-
-FLAG-149: `we maintain list of things that are making the camp dirty increase over time and have to be cleaned` is ambiguous about what exactly `increase over time` refers to.
-
-FLAG-150: `Craft a satchel` says it increases `someone’s` carry capacity by `30kg`, but does not specify who that someone is.
-
-FLAG-162: This section repeats the bed roll/cot placement action from `## place down resting spot`; confirm whether sleep can directly trigger placement or only use previously placed spots.
-
-FLAG-163: Sleep references `effects of cold`, but no cold stat, temperature system, or cold behavior is defined elsewhere in the spec.
-
-FLAG-175: Mood depends on `loneliness`, but the state section later defines `connectedness` instead of a standalone loneliness stat; it is unclear whether these are the same state under different names or two separate values.
-
-FLAG-181: Connectedness is defined here, but it is not referenced by the well-being or mood formulas, while `loneliness` is referenced elsewhere without its own section.
-
-FLAG-195: `hitting half causes you to 2 * 6 = 3` is incomplete/garbled and does not specify any implementable effect at half wakefulness.
-
-FLAG-196: `I’M FUCKIN TWEAKIN IT BRO! I’M TWEAKIN IT OUT! IM OHH YEAHHH !!` appears to be non-spec text and has no clear design meaning; confirm whether it should be ignored.
-
-FLAG-222: This section uses `hunger` as the target metric, but the state model defines `satiation`; the target stat and its scale need to be confirmed.
-
-FLAG-223: The autobalancing algorithm is framed as `maybe something really simple`, so it is unclear whether this exact daily percentage rule is authoritative or still provisional.
-
-FLAG-238: `all status descriptions` is not fully specified yet because the status system and surfaced descriptions are still explicitly unfinished.
-
-FLAG-263: Long-term memory compaction is left at `same prompt as above basically`, which is too vague to implement as a concrete source-of-truth rule.
