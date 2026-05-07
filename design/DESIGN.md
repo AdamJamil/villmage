@@ -21,7 +21,11 @@ Static authored identity for each villager.
 
 - *Gatherer profession is undefined but referenced.* BHVR-38 applies a `4x` penalty to "non-gatherers" exploring for peaches. ATTR-37 lists professions as crafting, woodcutting, hunting, and cooking — gatherer is absent. Maren is titled "the Gatherer" but no formal profession is defined. Does Maren get a `gatherer` profession tag that waives the 4x penalty? Or does everyone take the penalty (making peach gathering uniformly slow)? This is a gating rule in Action System and must be resolved before any exploration logic is written.
 
+**Resolution:** Maren receives a formal `gatherer` profession tag, exempting her from the 4x peach-exploration penalty. ATTR-37 expands to six professions: crafting, woodcutting, hunting, cooking, gathering, building.
+
 - *Harren has no profession.* He is "the Builder" but builder maps to nothing in ATTR-37. Is Harren a generalist with no gated abilities? If so, he's the only one with no profession-specific advantage.
+
+**Resolution:** Harren gets a `builder` profession tag with no mechanical effect. It is a real profession in the system (one of the six in ATTR-37), but has no bonuses or penalties. This is intentional.
 
 ---
 
@@ -52,9 +56,15 @@ Per-villager mutable survival stats, inventory, and in-progress action tracking.
 
 - *Starting stats are mostly unspecified.* CONST-176 gives `social_joy = 20`. No starting values are given for wakefulness, satiation, hydration, cleanliness, or connectedness. Also no starting inventory or base resources.
 
+**Resolution:** All stats start at maximum — wakefulness 100, satiation 1800 cal, hydration 6000 mL, connectedness 100, cleanliness 100. social_joy starts at 20 per CONST-176. No starting inventory or base resources.
+
 - *Base cleanliness has no normalization formula.* The mood formula uses `b` (base cleanliness) scaled 0–1. World State tracks raw dirtiness (e.g., +30 per carcass remains), but there is no conversion formula. What is the maximum possible dirtiness, and how does the raw number map to a 0–1 score? Without this, the mood formula cannot be evaluated.
 
+**Resolution:** Dirtiness caps at 100. Cleanliness = `1 - (dirtiness / 100)`, floored at 0.
+
 - *Does sleeping reset the rest buff?* BHVR-112 says "activate the rest buff after resting for one hour." The mood formula uses `r` = "time since last rest in hours," which gives a buff for up to 5 hours post-rest. If sleep does not reset `r`, a villager who sleeps but never uses the explicit "Sit and relax" action will permanently have a degraded mood through this channel. If sleep does reset it, `r` resets whenever the villager wakes up.
+
+**Resolution:** Sleep does NOT reset the rest buff. Only the explicit "Sit and relax" action (BHVR-112) activates it.
 
 ---
 
@@ -83,6 +93,8 @@ Shared mutable base: storage, fire, water, carcasses, placed objects, dirtiness.
 
 - *What happens when a carcass rots?* CONST-128 says it rots after 24h if not butchered. STRCT-131 includes "carcass remains" as a dirtiness source. Does a rotted carcass become remains (adding +30 dirtiness per CONST-132) and then disappear? Or does it just vanish silently? Or does it remain as an object?
 
+**Resolution:** Both butchering and rotting produce carcass remains (+30 dirtiness each). Rotting also destroys the meat. Remains persist until cleaned.
+
 ---
 
 ### SIMULATION ENGINE
@@ -106,9 +118,15 @@ Discrete-event scheduler. Top-level entry point.
 
 - *Forced sleep has no defined duration.* BHVR-192 says wakefulness = 0 forces the villager to sleep. BHVR-152 says a villager chooses 4–12 hours when sleeping voluntarily. Forced sleep has no duration rule. Does the villager sleep until wakefulness hits some cap? Until a fixed default (e.g., 8 hours)? Until the player-equivalent of an AI decision?
 
+**Resolution:** Forced sleep is always 4 hours.
+
 - *Safety recalculation timing.* BHVR-201 says "Recalculate safety each day." Is this at midnight, or when the simulation first starts each calendar day? This affects whether eating your last food immediately tanks your safety score or only does so at the next recalculation.
 
+**Resolution:** Per-villager, recalculated when they wake up — not on a global clock.
+
 - *Autobalance multiplier bounds.* BHVR-221 compounds adjustments daily. No bound is specified. With sustained deviation in one direction, multipliers could diverge significantly over many days.
+
+**Resolution:** Unbounded. The feedback loop self-regulates.
 
 ---
 
@@ -136,9 +154,15 @@ Action catalog: eligibility, cost, effect.
 
 - *What does "at base" mean for action eligibility?* BHVR-79 says eating/drinking requires being "at base." BHVR-43 limits conversations to villagers "at base." Exploration and hauling take villagers away. Is "at base" simply defined as "not currently on an away action (exploration, hauling)"? This needs a precise definition.
 
+**Resolution:** "At base" means not on an away action (exploration or hauling). For actions requiring active participation (e.g., conversation), also requires being awake.
+
 - *Fire goes out during cooking.* CONST-147 requires a lit fire for cooking. If the fire extinguishes while a villager is mid-cook, the cooking action is now running without a valid precondition. Should it cancel? Complete as-is? Pause until relit?
 
+**Resolution:** Cooking pauses gracefully. Villager receives feedback "The fire went out; you cannot continue cooking." Once relit, the action menu shows "Finish cooking" instead of "Cook."
+
 - *Crafting resources drawn from base vs. inventory.* VRBTM-123 shows misc actions using "inventory and base." Crafting materials (e.g., processed hide for satchel) aren't explicitly called out the same way. Does crafting draw from base, or only from inventory?
+
+**Resolution:** Crafting draws from inventory first, then base storage for the remainder.
 
 ---
 
@@ -163,7 +187,9 @@ Multi-villager conversation and trade protocol.
 
 - *Join prompt timing.* When the join prompt fires (after turn 2), does the conversation pause while non-participants decide, or does it proceed immediately and newcomers enter from the next available turn? This affects how many turns the original participants take before potential joiners arrive.
 
-- *Trade acceptance rule edge case.* BHVR-63: "Accept a trade only when one party accepts and the other party was the last to make an offer." If A accepts, then B accepts, the trade does NOT go through (B's last action was accepting, not offering). Only accepting in direct response to an offer works. Seems intentional but is an easy implementation mistake.
+**Resolution:** Conversation pauses while non-participants decide whether to join.
+
+- *Trade acceptance rule.* BHVR-63: "Accept a trade only when one party accepts and the other party was the last to make an offer." This was flagged as a potential ambiguity but is not one — the rule is clear. One party offers, the other accepts, trade completes. Accepting in response to a non-offer action does not trigger the trade.
 
 ---
 
@@ -197,6 +223,8 @@ Per-villager event logs, thoughts, relationships, and tiered memory compaction.
 
 - *Long-term compaction trigger.* BHVR-259 says "beyond three days, compact all medium-term memories into long-term memories." Does this fire once at midnight of day 3, compacting everything accumulated, and then again at each subsequent midnight? Or is it a one-time operation? The spec says "compact all medium-term memories" which implies it runs on a schedule.
 
+**Resolution:** Fires every third day (day 3, 6, 9, etc.), compacting all medium-term memories accumulated since the last long-term compaction.
+
 ---
 
 ### AI COORDINATOR
@@ -223,7 +251,11 @@ Prompt assembly, LLM invocation, response parsing.
 
 - *Which model?* CONST-261 references "gemini flash 2.5" with a 2k token budget as the only model mentioned. This is the only place in the spec where a model is named. Is Gemini Flash 2.5 the chosen model for all calls, including the action-selection prompt? Confirm before writing API client code.
 
+**Resolution:** Gemini Flash 2.5 for all LLM calls in the system.
+
 - *Retry limit.* The subsystems doc says "retries on malformed output" but no max retry count is specified. Infinite retries would hang the simulation.
+
+**Resolution:** One retry on malformed output, then crash hard. Every failure logs the full prompt, raw response, and exact parsing error to a file.
 
 ---
 
@@ -265,7 +297,11 @@ Replay surface and persistence.
 
 - *Checkpoint restart format.* REQ-272 says "support restarting the simulation from any checkpoint." For this to work, checkpoints must be machine-readable by the Simulation Engine (not just human-readable for the viewer). The subsystems doc treats Observability as read-only offline with no runtime coupling. If restart is a hard requirement, either Simulation Engine reads checkpoint files directly, or there's a deserialization path that isn't yet designed.
 
+**Resolution:** In scope for v1. Checkpoints must be fully machine-readable by the Simulation Engine — complete serialized simulation state.
+
 - *Perspective-specific visibility definition.* BHVR-11 allows viewing each character's perspective. What exactly can each character observe? Presumably: their own actions and stats, any events at base while they are at base, any conversation they participated in, and explicitly nothing from when they were away. This needs a precise filter definition before the event log schema can be locked in.
+
+**Resolution:** A villager sees their own actions always, conversations they participated in, and all base events while they were both present and awake. Sleeping at base or being away = invisible.
 
 ---
 
@@ -287,7 +323,11 @@ Multiplying calories by calories/day gives cal²/day, not a dimensionless score.
 
 Confirm the intent before implementing.
 
+**Resolution:** Confirmed corrected — divide by 2200, not multiply. The formula to implement is `((calories_in_inventory / 2200) + (1/villagers) * (calories_in_base / 2200)) / 5`.
+
 **Firewood safety has no "night" definition.** CONST-204 says firewood safety measures "firewood needed only for the night." The spec never defines what "night" is — no day/night cycle or fire schedule is specified. Sleep modifiers reference fire state but not time-of-day. Unless "night" is defined, firewood safety cannot be computed.
+
+**Resolution:** Convert base firewood to total burn minutes, assume one night = 8 hours (480 minutes). Firewood safety = `(total_burn_minutes / 480) / 5`. No per-villager split since fire is shared.
 
 ---
 
@@ -313,72 +353,40 @@ This is the correct reading of the spec ("synchronous, blocks until done"). The 
 
 ---
 
-### [Unresolved] Python Concurrency Model for LLM Fan-Outs
+### [Decided] Python Concurrency Model for LLM Fan-Outs
 
-Conversation turns explicitly require prompting all participants "in parallel." The concurrency model for this is unspecified.
-
-**Proposal:** `asyncio` throughout. All LLM Client calls are `async def`. The Simulation Engine's top-level loop is `async`. Parallel LLM calls inside conversation turns use `asyncio.gather`. No threads.
-
-**Alternative:** `concurrent.futures.ThreadPoolExecutor` wrapping synchronous SDK calls.
-
-**Rationale:** This is the highest-blast-radius unresolved decision. It affects LLM Client, AI Coordinator, Conversation System, and Memory System call sites. `asyncio.gather` is cleaner for structured fan-outs; the Gemini SDK supports async natively. Threading works but adds shared-state risk and is harder to reason about. Must be decided before writing any code that calls the LLM.
+Trio with structured concurrency. Nurseries for LLM fan-outs. No asyncio, no threads. Trio's nurseries enforce that all child tasks complete or error before the parent scope exits, preventing orphaned LLM calls. This affects LLM Client, AI Coordinator, Conversation System, and Memory System call sites.
 
 Criterion: (2) Large blast radius, (5) Most technically complex.
 
 ---
 
-### [Unresolved] Game Time Representation
+### [Decided] Game Time Representation
 
-Every subsystem stores or compares timestamps (event heap, action completion, carcass rot, fire extinction, memory compaction triggers). No representation is specified.
-
-**Proposal:** Plain `int` representing elapsed game minutes from epoch (game start = 0; "Day 1, 6:00 AM" = 360).
-
-**Alternative:** Python `datetime` with a fixed epoch and `timedelta` arithmetic.
-
-**Rationale:** The spec uses integer minutes and hours throughout. A plain int avoids datetime parsing, DST hazards, and float drift. Midnight detection is `t % 1440 == 0`. This type appears at every event heap entry and every timestamp comparison — wrong choice is painful to refactor.
+Plain `int` — elapsed minutes from game start (epoch = 0, "Day 1, 6:00 AM" = 360). Midnight detection is `t % 1440 == 0`. The spec uses integer minutes and hours throughout; a plain int avoids datetime parsing, DST hazards, and float drift. Conversion utilities for human-readable formatting in logs.
 
 Criterion: (1) Sticky, (2) Large blast radius.
 
 ---
 
-### [Unresolved] Persistence Format
+### [Decided] Persistence Format
 
-The event log and checkpoint format are unspecified. Both must be readable by the Simulation Engine (for checkpoint restart, REQ-272) and by the Observability viewer (for replay). They must also be distinguishable: the event log is append-only; checkpoints are periodic full snapshots.
-
-**Proposal:** JSON Lines (`.jsonl`) for the event log — one JSON object per line, file-append only. Checkpoint snapshots as individual `.json` files named by in-game timestamp.
-
-**Alternative:** SQLite with an events table and a checkpoints table.
-
-**Rationale:** Human-readable format is essential for debugging a sim where emergent behavior is the product. JSONlines requires no schema management and is trivially appendable. SQLite is overkill for v1 and adds a schema-migration concern. If Observability replay becomes slow, a SQLite index can be added without touching the rest of the system. Checkpoint files being separate from the event log keeps restart logic simple: load the `.json` snapshot, then replay `.jsonl` entries after its timestamp.
+JSON Lines (`.jsonl`) for the append-only event log. Individual `.json` files for checkpoint snapshots, named by in-game timestamp. Human-readable format is essential for debugging emergent behavior. JSONlines requires no schema management and is trivially appendable. Checkpoint files being separate from the event log keeps restart logic simple: load the `.json` snapshot, then replay `.jsonl` entries after its timestamp. SQLite can be added later if replay performance becomes an issue.
 
 Criterion: (1) Sticky — the format is baked into Observability reconstruction logic and Simulation Engine restart.
 
 ---
 
-### [Unresolved] LLM Model and Caching Mechanism
+### [Decided] LLM Model and Caching Mechanism
 
-CONST-261 names "gemini flash 2.5" and a 2k token memory budget. REQ-224 specifies prompt field order for cache optimization but not the caching API semantics. Two sub-decisions are needed before writing LLM Client:
-
-**1. Model scope.** Is Gemini Flash 2.5 used for all call types — action selection, conversation turns, memory compaction, relationship updates? Or is a different model used for heavier calls (e.g., action selection) vs. lighter utility calls (compaction)? Affects cost model and prompt design.
-
-**2. Caching mechanism.** Gemini exposes two caching paths: implicit context caching (automatic, prompt-prefix-based) and an explicit Cache API (upload a prefix once, reference it by ID). REQ-224's field ordering only works as intended if the caching behavior matches the implementation. If the explicit Cache API is required (i.e., the static prefix must be uploaded separately), LLM Client must manage cache object lifecycle — a materially different design from simply ordering prompt segments.
-
-**Recommendation:** Before finalizing LLM Client, prototype one full action-selection prompt with the real model. Verify cache hits are occurring at the expected static/dynamic boundary. This is the one place where a hidden assumption can silently blow up cost and latency at runtime.
+Gemini Flash 2.5 for all call types (action selection, conversation turns, memory compaction, relationship updates). Implicit prefix caching only — order prompt segments static-to-dynamic per REQ-224, and rely on the model's automatic prefix-based caching. No explicit Cache API or cache object management. This keeps LLM Client simple (no cache lifecycle) while still benefiting from prefix reuse across calls for the same villager within a session.
 
 Criterion: (3) Requires technical prototyping, (4) Risky, (6) Directly affects prompt design (creative vision).
 
 ---
 
-### [Unresolved] Event Heap Invalidation Strategy
+### [Decided] Event Heap Invalidation Strategy
 
-The conversation join mechanic (BHVR-44) requires pausing a villager's in-progress task when they are pulled into a conversation, then resuming it afterward. This means a previously-scheduled completion event must be cancelled mid-flight.
-
-Min-heaps do not support efficient deletion. Two standard approaches:
-
-**Proposal:** Lazy invalidation — tag each scheduled event with a `(villager_id, generation)` token. Increment the villager's generation when their active task is cancelled. When an event fires, check its generation against the current value; discard if stale. Re-schedule the remainder as a new event with the updated generation.
-
-**Alternative:** Maintain a parallel dict of `villager_id → scheduled_event` and mark cancelled events with a flag; pop-and-discard stale events when encountered.
-
-**Rationale:** Lazy invalidation is the standard heap trick and requires no secondary data structure. The per-villager generation counter fits naturally in Villager State. The alternative dict requires keeping heap entries and dict entries in sync, which is error-prone. This decision only affects Simulation Engine internals but must be settled before implementing task scheduling.
+Direct removal from heap on cancel/pause. No lazy invalidation. When a villager's task is paused (e.g., pulled into a conversation), the scheduled completion event is removed directly from the heap and a new event for the remainder is scheduled after the interruption ends. This avoids the complexity of generation counters and stale-event checks at the cost of O(n) removal, which is acceptable given the small event count (handful of villagers).
 
 Criterion: (4) Risky — getting this wrong causes silent task-resume bugs that only surface in specific conversation timing scenarios.

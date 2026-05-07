@@ -138,7 +138,7 @@ INVR-117: The fire can hold at most `4 hours` of fuel at once.
 
 ### Professions And Static Unlocks
 
-ATTR-37: Crafting, log exploration (woodcutter), hunting (hunter), and cooking are profession-locked.
+ATTR-37: Six professions exist: crafting (crafter), woodcutting (woodcutter), hunting (hunter), cooking (cook), gathering (gatherer), and building (builder). Crafting, log exploration (woodcutter), hunting (hunter), and cooking are profession-locked. Gathering exempts Maren from the `4x` peach-exploration penalty (BHVR-38). Building has no mechanical effect.
 
 ATTR-140: The crafter profession unlocks the satchel, bed roll, and cot crafting recipes.
 
@@ -171,6 +171,8 @@ REQ-36: Each action subsection reflects an action that can be taken and when it 
 BHVR-38: When a non-gatherer explores for peaches, apply a `4x` slower speed modifier.
 
 BHVR-39: Present modified action times using the health work-speed modifier and profession modifier rather than the raw times listed below.
+
+BHVR-284: A villmager is "at base" when not performing an away action (exploration or hauling). Actions requiring active participation (e.g., conversation) additionally require the villmager to be awake.
 
 ## 4. Action Catalog
 
@@ -255,6 +257,8 @@ BHVR-111: Resting improves mood.
 
 BHVR-112: After resting for one hour, activate the rest buff used in the mood formula.
 
+BHVR-281: Sleeping does NOT activate the rest buff. Only "Sit and relax" (BHVR-112) does.
+
 ### Fire Tending
 
 BHVR-113: Villmagers can tend the fire by adding sticks or firewood and by lighting or extinguishing the fire.
@@ -284,7 +288,7 @@ BHVR-119: Extinguishing the fire preserves the remaining fuel.
 
 ### Misc Actions, Crafting, And Cooking
 
-BHVR-122: Misc actions can use resources from inventory and base.
+BHVR-122: Misc actions can use resources from inventory and base. Resources are drawn from the villmager's inventory first, then from base storage for the remainder.
 
 VRBTM-123:
 
@@ -335,6 +339,8 @@ BHVR-127: `Butcher boar carcass for meat` produces `14 raw meat`.
 
 CONST-128: A carcass rots after `24h` if it has not been butchered after being brought back.
 
+BHVR-282: When a carcass rots, it is destroyed and produces carcass remains (`+30` dirtiness per CONST-132). Butchering a carcass also produces carcass remains.
+
 CONST-129: `Butcher boar carcass for meat` takes `2 hours`, decreases villmager cleanliness by `50`, and costs `200 cal`.
 
 NOTE-130: why? it takes 20h to find a boar, which is two days of work. that needs to feed half the camp = 3 villmagers (assuming equal split of meat/peaches), so each boar needs to be 6 days worth of food. that’s 6 days * 1800 calories/day / 800 calories/meat = 13.5, so I round up to 14
@@ -364,6 +370,8 @@ BHVR-144: Always show crafter recipes to crafters in a separate prompt section e
 BHVR-145: If an item was not finished being crafted, include `Continue crafting <item>` with `minutes_to_spend_now` up to the remaining time.
 
 CONST-147: Cooking raw meat to cooked meat takes `30 m` and requires a lit fire.
+
+BHVR-285: If the fire extinguishes during cooking, cooking pauses gracefully. The villmager receives feedback: "The fire went out; you cannot continue cooking." When the fire is relit, the action menu shows "Finish cooking" instead of "Cook."
 
 ### Sleeping
 
@@ -415,7 +423,7 @@ BHVR-43: When at base, a villmager may initiate a conversation with one other vi
 
 BHVR-44: When a villmager is pulled into a conversation, pause their task gracefully and resume it when the conversation ends or they choose to leave.
 
-BHVR-45: When a conversation reaches two turns, other villagers at base are prompted to optionally join with a brief description of the conversation.
+BHVR-45: When a conversation reaches two turns, other villagers at base are prompted to optionally join with a brief description of the conversation. The conversation pauses while non-participants decide whether to join.
 
 VRBTM-46:
 
@@ -582,6 +590,10 @@ VRBTM-185:
 - [20-100] The base could be cleaner.
 - [0-20] The base is filthy.
 
+CONST-279: Maximum camp dirtiness is `100`.
+
+CONST-280: Base cleanliness for the mood formula is `max(0, 1 - (total_dirtiness / 100))`.
+
 ### Health
 
 CONST-186: `w`, `s`, and `h` are wakefulness, satiation, and hydration scaled to `0-1`.
@@ -605,6 +617,8 @@ BHVR-191: As with mood, use partial-derivative computation to choose which healt
 ### Wakefulness
 
 BHVR-192: When wakefulness hits `0`, the villmager falls asleep and their existing task is cancelled.
+
+CONST-283: When forced to sleep by BHVR-192, sleep duration is always `4 hours`.
 
 CONST-193: Wakefulness drains by `3` per hour when awake.
 
@@ -644,13 +658,29 @@ VRBTM-200:
 
 ### Safety
 
-BHVR-201: Recalculate safety each day based on stockpiled food and firewood.
+BHVR-201: Recalculate safety per-villager when they wake up (not on a global daily clock), based on stockpiled food and firewood.
 
-CONST-202: Food safety score is `((calories in inventory) * (2200 calories per day) + (1 / living villmagers) * (calories in base) * (2200 calories per day)) / 5`.
+CONST-202: Food safety score is `((calories in inventory / 2200) + (1 / living villmagers) * (calories in base / 2200)) / 5`.
 
-CONST-204: Firewood safety score uses the same structure, but measures amount of firewood needed only for the night across the next `5` days.
+CONST-204: Firewood safety score: convert base firewood to total burn minutes, assume one night = `8 hours` (`480 minutes`). Firewood safety = `(total_burn_minutes / 480) / 5`. No per-villager split since fire is shared.
 
 CONST-205: Safety is the average of food safety score and firewood safety score.
+
+### Starting Values
+
+CONST-273: Wakefulness starts at `100`.
+
+CONST-274: Satiation starts at `1800 cal`.
+
+CONST-275: Hydration starts at `6000 mL`.
+
+CONST-276: Connectedness starts at `100`.
+
+CONST-277: Cleanliness starts at `100`.
+
+CONST-176 already defines social joy starting at `20`.
+
+BHVR-278: Villmagers begin with no inventory and the base begins with no resources.
 
 ### Inventory, Encumbrance, Death, And Remedial Feedback
 
@@ -720,7 +750,7 @@ VRBTM-257:
 
 NOTE-258: Long-term memory may not be needed for the expected experiment duration.
 
-BHVR-259: Beyond three days, compact all medium-term memories into long-term memories.
+BHVR-259: Long-term compaction fires every third day (day 3, 6, 9, etc.), compacting all medium-term memories since the last long-term compaction into long-term memories.
 
 VRBTM-270:
 
@@ -782,6 +812,10 @@ VRBTM-240:
 
 STRCT-241: The villmager prompt always includes a timestamp.
 
+BHVR-286: On malformed LLM output, retry once. If the retry also fails, crash the simulation.
+
+BHVR-287: Every LLM failure (including retried ones) logs the full prompt, raw response, and exact parsing error to a file.
+
 ## 9. Balance, Adaptation, And Tuning Notes
 
 REQ-215: Adaptively buff or nerf satiation restoration, hydration restoration, and exploration yield based on how well villmagers are doing in related areas.
@@ -804,7 +838,7 @@ REQ-9: The observability surface is implemented with HTML, CSS, and JavaScript.
 
 ATTR-10: The observability surface uses a dark theme.
 
-BHVR-11: The observability surface allows viewing the event log from each character's perspective.
+BHVR-11: The observability surface allows viewing the event log from each character's perspective. A villmager's perspective includes their own actions always, conversations they participated in, and all base events that occurred while they were both at base and awake. Events during sleep or away time are excluded.
 
 BHVR-12: When a villmager takes an action, write an event-log entry and dump/save it.
 

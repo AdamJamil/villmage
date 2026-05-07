@@ -24,6 +24,7 @@ Nine subsystems plus a thin LLM Client leaf. Key calls:
 
 ### Key rules
 - Backstory, personality, desires, profession tags, and bios are authored once and never modified by simulation.
+- Six professions: crafting, woodcutting, hunting, cooking, gathering, building. Builder has no mechanical effect — it gates nothing in Action System.
 - Profession tags gate which exploration types, crafting recipes, and cooking actions are conceptually available. Canon says "can conceptually do X" — Action System decides if X is currently legal.
 
 ---
@@ -55,6 +56,9 @@ Nine subsystems plus a thin LLM Client leaf. Key calls:
 - Derived stats: health from (wakefulness, satiation, hydration); mood from (social_joy, connectedness, cleanliness, base_cleanliness, rest_hours); well-being from (mood, health, safety).
 - For health and mood, identifies which input has the highest partial derivative at current values — used to select which sub-description to surface in prompts.
 - Safety requires cross-subsystem context (base calories, base firewood, living count), so the caller must pass these in.
+- Starting values: wakefulness 100, satiation 1800, hydration 6000, social_joy 20, connectedness 100, cleanliness 100. No starting inventory.
+- Cleanliness normalization: `1 - (total_dirtiness / 100)`, floored at 0. Max dirtiness = 100.
+- Sleep does NOT reset the rest buff timer.
 - Generates natural-language prompt text for each stat at the appropriate descriptive tier.
 
 ---
@@ -86,6 +90,7 @@ Nine subsystems plus a thin LLM Client leaf. Key calls:
 - All mutations through explicit setters. All queries are side-effect-free.
 - Fire fuel queue is ordered; consumption is FIFO.
 - Carcass rot is tracked by arrival timestamp; Simulation Engine schedules the 24-hour deadline externally.
+- Both butchering and rotting produce carcass remains (+30 dirtiness). Rotting destroys the meat; butchering yields it.
 
 ---
 
@@ -117,6 +122,10 @@ Nine subsystems plus a thin LLM Client leaf. Key calls:
 - Threshold crossings from decay: wakefulness zero → force sleep; health zero → death (remove villager, append death event).
 - Fire extinction mid-sleep: calls adjust_active_sleep on Action System for each sleeping villager, splitting remaining sleep into a new segment under updated modifier.
 - Midnight autobalancing: reads average wakefulness/satiation/hydration and base food/firewood supply, computes deviation from targets, writes adjusted multipliers. Targets and algorithm are owned here, not in Action System.
+- Forced sleep duration is always 4 hours.
+- Safety recalculates per-villager when they wake up.
+- Autobalance multipliers are unbounded.
+- Event heap invalidation: direct removal from heap on cancel/pause. No lazy invalidation scheme.
 - Conversations are synchronous: calls run_conversation, which returns elapsed game time; resumes the initiating villager's event slot.
 
 ---
@@ -146,7 +155,10 @@ Nine subsystems plus a thin LLM Client leaf. Key calls:
 - Each action: eligibility predicate, time cost formula (modified by profession + health), calorie cost, start-effect, completion-effect.
 - Valid action list: eligible actions get full descriptions with quantities and constraints; ineligible crafter recipes get "Cannot perform" labels rather than being omitted.
 - Start effects apply immediately (e.g., consuming raw materials for crafting). Completion effects apply when Simulation Engine fires the scheduled event.
-- Fire tending fuel preference: inventory fuel before base fuel. Crafting and misc actions draw from both inventory and base.
+- "At base" = not on an away action (exploration, hauling). For active-participation actions (conversation), also requires awake.
+- Fire out mid-cook: cooking pauses gracefully. Villager gets feedback "The fire went out; you cannot continue cooking." Once relit, menu shows "Finish cooking" instead of "Cook."
+- Crafting draws from inventory first, then base storage.
+- Fire tending fuel preference: inventory fuel before base fuel.
 - Exploration yield: Erlang(k=5) sampling, truncated when inventory would be full.
 - Profession gating: crafting, cooking, and woodcutting require matching profession; incompatible exploration types get 4× time penalty.
 - Long-running crafting: start records (item, minutes_spent) in Villager State; completion step checks accumulated time.
@@ -176,7 +188,7 @@ Nine subsystems plus a thin LLM Client leaf. Key calls:
 ### Key rules
 - Runs synchronously until all participants leave or 60 game-minutes elapse. Each turn = 5 game-minutes.
 - Turn priority: leave > significant interaction > trade > interrupt > continue > respond > topic change > casual action > silent. All participants prompted in parallel; winning action chosen by priority, then recency tiebreak.
-- After second turn: each non-participant at base gets a join prompt with the opening excerpt.
+- Conversation pauses after turn 2 while non-participants decide whether to join. Each non-participant at base gets a join prompt with the opening excerpt.
 - Trade sub-protocol: alternates offer/request/accept/cancel between two villagers. Zero game-time per trade turn. Accepts when one party has accepted and the other's last action was an offer. Cancels after 6 turns without mutual acceptance. Inventory transfers applied immediately.
 - Post-conversation: each participant gives a social score delta (0–10) and per-other-participant impression. Social_joy delta and impressions written to Memory System.
 - Concurrent leaves are all honored even when only one action "wins" per turn.
@@ -209,6 +221,7 @@ Nine subsystems plus a thin LLM Client leaf. Key calls:
 ### Key rules
 - Short-term compaction trigger: villager goes to sleep, OR villager completes an action and has been awake ≥4 hours since last compaction. Submits raw log to LLM; stores ≤128-token summary; clears in-context log.
 - Medium-term compaction trigger: midnight. Submits all short-term memories from previous calendar day; stores ≤256-token summary; clears those short-term entries.
+- Long-term compaction fires every third day (day 3, 6, 9, etc.), compacting all medium-term memories since the last long-term compaction.
 - Total memory budget per villager across all tiers: ≤2k tokens.
 - Relationship descriptions updated after conversations via LLM-generated text. Impression queue is FIFO capped at 3.
 - Full state snapshots flushed to disk when Simulation Engine requests.
@@ -239,7 +252,8 @@ Nine subsystems plus a thin LLM Client leaf. Key calls:
 ### Key rules
 - Action-selection prompt field order (most-static to least-static for cache optimization): system prompt → backstory → character description → other characters' bios + relationship data → memories → world state summary → villager state descriptions → valid action list → thoughts request → timestamp.
 - Cache breakpoints placed at static/dynamic boundaries.
-- Parses JSON responses to extract action index, args, thoughts. Retries on malformed output. Returns validated action references, never raw JSON.
+- Uses Gemini Flash 2.5 for all LLM calls.
+- Parses JSON responses to extract action index, args, thoughts. One retry on malformed output, then crash. Full diagnostic log (prompt, response, exact parsing error) on every failure. Returns validated action references, never raw JSON.
 - Separate prompt templates for: action selection, conversation turn, join decision, social score, relationship update, thought capture, memory compaction.
 - Read-only against all domain state. Callers provide input; coordinator renders and parses.
 
@@ -263,7 +277,9 @@ Nine subsystems plus a thin LLM Client leaf. Key calls:
 - External LLM API.
 
 ### Key rules
+- Implicit prefix caching — no explicit Cache API management.
 - Accepts prompt segments + caller-specified cache breakpoint indices. Applies cache-control headers at those positions.
+- Uses Trio for async (structured concurrency with nurseries for fan-outs).
 - Retries transient API errors with exponential backoff.
 - Returns raw completion text. No parsing or interpretation.
 
@@ -287,8 +303,9 @@ Nine subsystems plus a thin LLM Client leaf. Key calls:
 - Nothing.
 
 ### Key rules
+- Checkpoint restart is in scope for v1. Checkpoints must be machine-readable by Simulation Engine.
 - Reconstructs simulation state by replaying deltas forward from nearest preceding checkpoint.
-- Supports perspective-specific reconstruction: what each villager saw and knew at a given time, not just omniscient state.
+- Perspective filter: own actions always visible, own conversations, base events while present AND awake. Sleep or away = invisible.
 - Renders HTML/CSS/JS viewer with per-villager event log navigation, timestamp display, and highlighted state deltas.
 
 ---
