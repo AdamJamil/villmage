@@ -444,3 +444,15 @@ def get_memory_context(self, villager_id: str) -> VillagerMemoryContext:
 → ISSUE: The "Key Logic Notes — Compaction Triggers" section states that after short-term compaction fires, Simulation Engine calls `VillagerState.reset_compaction_counter()`, and internally relies on an `awake_minutes_since_compaction` counter. Neither this method nor this field appears anywhere in the Villager State design or subsystem documentation. The ownership and API for this counter are undefined across subsystem boundaries.
 
 → ISSUE: The "Persistence and Snapshots" section states Memory System serializes state "to a single `.json` checkpoint file," implying it writes to disk directly. The `trigger_snapshot` API surface returns `dict[str, object]`, and the same paragraph states "Simulation Engine coordinates the combined write." All three statements cannot simultaneously be true.
+
+→ STYLE: `trigger_midnight_compaction` has high cyclomatic complexity: it must iterate all villagers, conditionally force short-term compaction for each, run medium-term compaction per-villager, and conditionally invoke long-term compaction — all in one function body. The cascading trigger chain (long-term forces medium, medium forces short) is order-dependent and should be split into discrete named steps rather than one monolith.
+
+→ STYLE: `MemorySystem` is a god object: it owns disk I/O (event log flushing), three in-memory memory tiers, relationship records, async LLM fan-outs for compaction, snapshot serialization, and prompt context assembly. That is five distinct responsibilities. At minimum, relationship record management and compaction orchestration are strong candidates for extraction into helper objects.
+
+→ STYLE: `trigger_snapshot` returns `dict[str, object]` and `from_snapshot` accepts the same. In strict Pyre, `object` is essentially `Any` — the return type carries no schema, defeating type safety at the only subsystem restart boundary. A typed `MemorySnapshot` dataclass (parallel to `VillagerMemoryContext`) should be used instead.
+
+→ STYLE: `villager_id: str` is threaded through every public method. A dedicated `VillagerId` newtype (or `Literal`-constrained alias) would catch caller-site mixups (e.g., passing a subject id where a speaker id is expected) at the type level rather than silently producing wrong results at runtime.
+
+→ STYLE: `EventLogEntry.text` carries an implicit contract — it must be self-contained because it is fed verbatim into LLM prompts with no surrounding context. Nothing in the type enforces this; wrong text silently produces bad compaction summaries. A named constructor (e.g., `EventLogEntry.for_prompt(text)`) or a validated wrapper type would make the obligation explicit at the call site.
+
+→ STYLE: `write_impressions` silently drops the oldest impression when the queue reaches capacity. Callers who are not aware of the FIFO-drop behavior (e.g., expecting all impressions to accumulate) will get wrong results with no error. The drop behavior should be documented at the call site, or the method should return the dropped impression so callers can observe it.
