@@ -357,3 +357,13 @@ def get_base_summary(self) -> BaseSummary:
 → ISSUE: `extinguish_fire` documents that it sets the fire unlit and preserves the fuel queue, but does not state that `extinction_timestamp` is cleared to `None`. The Fire struct invariant implies this ("`extinction_timestamp` is set iff `lit == true`"), but the function contract is silent on it.
 
 → ISSUE: `get_base_summary` takes no parameters, but producing a meaningful fire status — specifically remaining burn minutes — requires `current_time` to compute `extinction_timestamp - current_time`. The function signature and `BaseSummary` description leave unresolved whether `BaseSummary` exposes the raw `extinction_timestamp` (requiring callers to subtract current time themselves) or a pre-computed remaining-minutes value (requiring `current_time` as a parameter).
+
+→ STYLE: `FuelType` (STICK, FIREWOOD) and `ItemType` (STICK, FIREWOOD) are parallel enums describing the same real-world objects with no explicit mapping between them. Fire-tending code in Action System must manually translate `ItemType` → `FuelType` on every call to `add_fire_fuel`; there is no helper and no compile-time enforcement. A mistranslation silently assigns wrong burn durations.
+
+→ STYLE: Carcass creation is a two-step footgun: `add_carcass` registers the rot tracker but the caller must separately call `modify_base_item(CARCASS, +1)` to add the item. Nothing enforces that both steps happen together; omitting either produces a silent invariant violation (rot timer without an item, or an item without a rot deadline).
+
+→ STYLE: Carcass removal is a three-step footgun: `remove_carcass` removes only the tracker record; the caller must separately remove the `CARCASS` item from wherever it is AND call `update_cleanliness_source(CARCASS_REMAINS, +1)`. Three distinct calls must always co-occur; any omission silently corrupts state without an error.
+
+→ STYLE: `clear_dirtiness` erases all dirtiness counts with no return value, but Action System must read the current dirtiness before clearing it to compute the cleanliness penalty applied to the cleaner (BHVR-137). The API imposes no ordering guarantee; if the caller clears before reading, the penalty is silently dropped. A `clear_and_return_dirtiness()` or similar atomic read-then-clear would eliminate the hazard.
+
+→ STYLE: `add_fire_fuel` and `light_fire` return the new `extinction_timestamp` as a signal for the caller to reschedule the Simulation Engine heap event. If the caller stores the return value but forgets to update the heap — or ignores it with `_` — the fire extinguishes at the wrong time with no error. The scheduling obligation is invisible in the type signature (`-> int | None`).
