@@ -79,6 +79,8 @@ enum FuelType {
 }
 ```
 
+Use `item_type_to_fuel_type` (defined in `world_state.py`) to convert between `ItemType` and `FuelType` when adding fuel to the fire.
+
 ---
 
 ### FuelUnit
@@ -162,14 +164,12 @@ struct Carcass {
 **Invariant:** `len(live_carcasses) == base_storage.get(CARCASS, 0) + sum(v.inventory.get(CARCASS, 0) for v in villagers)`. Action System is responsible for keeping this consistent on every hunt completion, butcher, storage transfer, and rot event.
 
 When a rot event fires for `carcass_id`:
-1. Remove the matching `Carcass` record from `live_carcasses`.
+1. Call `remove_carcass(carcass_id)` — removes the tracker record and increments `CARCASS_REMAINS` dirtiness.
 2. Remove one `CARCASS` item from wherever it currently is (search inventory first, then base_storage).
-3. Increment `dirtiness_counts[CARCASS_REMAINS]` by 1 (+30 dirtiness).
 
 When butchering:
-1. Remove one `CARCASS` from the butchering villager's inventory (or base_storage if that is where it was taken from — Action System resolves this).
-2. Remove the oldest `Carcass` record (minimum `arrival_timestamp`) from `live_carcasses`.
-3. Increment `dirtiness_counts[CARCASS_REMAINS]` by 1.
+1. Call `remove_carcass` on the oldest carcass (minimum `arrival_timestamp`) — removes the tracker record and increments `CARCASS_REMAINS` dirtiness.
+2. Remove one `CARCASS` from the butchering villager's inventory (or base_storage if that is where it was taken from — Action System resolves this).
 
 ---
 
@@ -180,22 +180,23 @@ The top-level mutable container. Not passed between subsystems directly; accesse
 ```thrift
 struct WorldState {
     1: map<ItemType, i32> base_storage,                    // quantity per type; absent key = 0; never negative
-    2: i32 water_supply_liters,                            // non-negative integer; haul adds 20, drink subtracts
+    2: i32 water_supply_ml,                                // non-negative; haul adds 20000, drink/wash subtracts
     3: Fire fire,
     4: map<DirtinessSource, i32> dirtiness_counts,         // count per source; absent key = 0
     5: map<string, RestingSpotType> placed_resting_spots,  // villager_id → spot; at most 1 per villager
     6: list<Carcass> live_carcasses,                       // sorted ascending by arrival_timestamp
+    7: i32 next_carcass_id,                                // auto-increment counter; starts at 1
 }
 ```
 
 **Notes:**
 - `base_storage` may include `CARCASS` entries; these are also mirrored in `live_carcasses` for rot tracking.
-- Water is base-only (INVR-84); `water_supply_liters` is the only water store.
+- Water is base-only (INVR-84); `water_supply_ml` is the only water store. Stored in mL so 500 mL washing costs can be represented precisely.
 - `dirtiness_counts` accumulates until a "Clean up camp" action completes, which zeroes all counts.
 - `placed_resting_spots` is distinct from `base_storage`: a placed bed roll or cot is removed from the placer's inventory, does NOT enter base_storage, and is recorded here instead.
 - `live_carcasses` is sorted for efficient oldest-first selection during butcher resolution; maintain sort order on insert.
 
-**Starting state:** all fields empty/zero (BHVR-278: base begins with no resources).
+**Starting state:** all fields empty/zero (BHVR-278: base begins with no resources). `next_carcass_id` starts at 1.
 
 ---
 
@@ -247,6 +248,15 @@ No functions. All content is pure data — enums and the weight table constant.
 
 ### `villmage/world_state.py`
 
+#### Module-level helper
+
+```python
+def item_type_to_fuel_type(item: ItemType) -> FuelType:
+    """Map ItemType.STICK or ItemType.FIREWOOD to the corresponding FuelType. Raises ValueError for non-fuel items."""
+```
+
+---
+
 #### `WorldState` — Mutations
 
 ```python
@@ -255,38 +265,38 @@ def modify_base_item(self, item: ItemType, delta: int) -> None:
 ```
 
 ```python
-def modify_water(self, delta_liters: int) -> None:
-    """Adjust base water supply; positive hauls, negative drinks."""
+def modify_water(self, delta_ml: int) -> None:
+    """Adjust base water supply in mL; positive for hauls (+20000), negative for drinking/washing."""
 ```
 
 ```python
 def add_fire_fuel(self, fuel_type: FuelType, quantity: int, current_time: int) -> int | None:
-    """Append fuel to the fire queue. If lit, extends extinction_timestamp by the added minutes and returns the new value so Simulation Engine can reschedule. Returns None if unlit."""
+    """Append fuel to the fire queue. If lit, extends extinction_timestamp by the added minutes and returns the new value so Simulation Engine can reschedule the fire-extinction heap event. Returns None if unlit."""
 ```
 
 ```python
 def light_fire(self, current_time: int) -> int | None:
-    """Set fire lit and compute extinction_timestamp from queued fuel. Returns extinction_timestamp so Simulation Engine can schedule the extinction event, or None if the queue is empty."""
+    """Set fire lit and compute extinction_timestamp from queued fuel. Returns extinction_timestamp so Simulation Engine can schedule the fire-extinction heap event, or None if the queue is empty."""
 ```
 
 ```python
 def extinguish_fire(self) -> None:
-    """Set fire unlit; preserve the fuel queue for future relighting."""
+    """Set fire unlit and clear extinction_timestamp to None. Preserves the fuel queue for future relighting."""
 ```
 
 ```python
 def mark_fire_extinguished(self) -> None:
-    """Called by Simulation Engine when the fire-extinction event fires. Sets unlit and empties the fuel queue (all fuel consumed)."""
+    """Called by Simulation Engine when the fire-extinction event fires. Sets unlit, clears extinction_timestamp, and empties the fuel queue (all fuel consumed)."""
 ```
 
 ```python
 def update_cleanliness_source(self, source: DirtinessSource, delta: int) -> None:
-    """Increment or decrement a dirtiness source count. Used on butcher (carcass_remains+1), eat meat (meat_scraps+1), cook meat (cooking_scraps+1), or rot (carcass_remains+1)."""
+    """Increment or decrement a dirtiness source count. Used on eat meat (meat_scraps+1) and cook meat (cooking_scraps+1). Carcass remains are handled automatically by remove_carcass."""
 ```
 
 ```python
-def clear_dirtiness(self) -> None:
-    """Zero all dirtiness source counts. Called when 'Clean up camp' completes."""
+def clear_dirtiness(self) -> int:
+    """Zero all dirtiness source counts and return the total dirtiness that was present before clearing. The caller uses the returned value to compute the cleaner's cleanliness penalty (BHVR-137)."""
 ```
 
 ```python
@@ -296,12 +306,12 @@ def place_resting_spot(self, villager_id: str, spot_type: RestingSpotType) -> No
 
 ```python
 def add_carcass(self, arrival_timestamp: int) -> int:
-    """Register a new carcass and return its auto-incremented id. Caller is responsible for adding the CARCASS item to base_storage or inventory separately."""
+    """Register a new carcass rot tracker using next_carcass_id, increment the counter, and return the assigned id. The caller must separately add the CARCASS item to the appropriate inventory or base_storage."""
 ```
 
 ```python
 def remove_carcass(self, carcass_id: int) -> None:
-    """Remove a carcass record on butcher or rot. Caller handles associated item removal and dirtiness update."""
+    """Remove a carcass rot tracker and increment CARCASS_REMAINS dirtiness by 1 (+30). The caller must separately remove the CARCASS item from wherever it currently is (inventory or base_storage)."""
 ```
 
 #### `WorldState` — Queries
@@ -342,28 +352,6 @@ def has_placed_spot(self, villager_id: str) -> bool:
 ```
 
 ```python
-def get_base_summary(self) -> BaseSummary:
-    """Return a structured snapshot of all base state for AI Coordinator prompt assembly. BaseSummary is a dataclass (defined in this module) containing: storage counts, water supply, fire state, total dirtiness, live carcass count, and placed resting spots."""
+def get_base_summary(self, current_time: int) -> BaseSummary:
+    """Return a structured snapshot of all base state for AI Coordinator prompt assembly. BaseSummary is a dataclass (defined in this module) containing: storage counts, water supply in mL, fire lit flag, remaining fuel minutes (computed from current_time), total dirtiness, live carcass count, and placed resting spots."""
 ```
-
----
-
-## Flags And Issues
-
-→ ISSUE: `water_supply_liters` is declared as `i32` (integer liters), but CONST-165 specifies washing costs 500 mL (0.5 L), which cannot be represented as a whole liter. Water supply must be stored in mL to handle this precisely.
-
-→ ISSUE: `WorldState` has no field for an auto-incrementing carcass ID counter. `add_carcass` promises to return a unique auto-incremented ID, but the struct definition provides no `next_carcass_id` or equivalent field. The counter mechanism is unspecified.
-
-→ ISSUE: `extinguish_fire` documents that it sets the fire unlit and preserves the fuel queue, but does not state that `extinction_timestamp` is cleared to `None`. The Fire struct invariant implies this ("`extinction_timestamp` is set iff `lit == true`"), but the function contract is silent on it.
-
-→ ISSUE: `get_base_summary` takes no parameters, but producing a meaningful fire status — specifically remaining burn minutes — requires `current_time` to compute `extinction_timestamp - current_time`. The function signature and `BaseSummary` description leave unresolved whether `BaseSummary` exposes the raw `extinction_timestamp` (requiring callers to subtract current time themselves) or a pre-computed remaining-minutes value (requiring `current_time` as a parameter).
-
-→ STYLE: `FuelType` (STICK, FIREWOOD) and `ItemType` (STICK, FIREWOOD) are parallel enums describing the same real-world objects with no explicit mapping between them. Fire-tending code in Action System must manually translate `ItemType` → `FuelType` on every call to `add_fire_fuel`; there is no helper and no compile-time enforcement. A mistranslation silently assigns wrong burn durations.
-
-→ STYLE: Carcass creation is a two-step footgun: `add_carcass` registers the rot tracker but the caller must separately call `modify_base_item(CARCASS, +1)` to add the item. Nothing enforces that both steps happen together; omitting either produces a silent invariant violation (rot timer without an item, or an item without a rot deadline).
-
-→ STYLE: Carcass removal is a three-step footgun: `remove_carcass` removes only the tracker record; the caller must separately remove the `CARCASS` item from wherever it is AND call `update_cleanliness_source(CARCASS_REMAINS, +1)`. Three distinct calls must always co-occur; any omission silently corrupts state without an error.
-
-→ STYLE: `clear_dirtiness` erases all dirtiness counts with no return value, but Action System must read the current dirtiness before clearing it to compute the cleanliness penalty applied to the cleaner (BHVR-137). The API imposes no ordering guarantee; if the caller clears before reading, the penalty is silently dropped. A `clear_and_return_dirtiness()` or similar atomic read-then-clear would eliminate the hazard.
-
-→ STYLE: `add_fire_fuel` and `light_fire` return the new `extinction_timestamp` as a signal for the caller to reschedule the Simulation Engine heap event. If the caller stores the return value but forgets to update the heap — or ignores it with `_` — the fire extinguishes at the wrong time with no error. The scheduling obligation is invisible in the type signature (`-> int | None`).
