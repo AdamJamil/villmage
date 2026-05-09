@@ -397,3 +397,31 @@ def adjust_active_sleep(
 ) -> int:
     """Splits an in-progress sleep on fire-state change. Applies wakefulness gain for elapsed_minutes at old_modifier, then returns the remaining duration in minutes for a new segment at new_modifier (BHVR-161)."""
 ```
+
+---
+
+## Flags and Issues
+
+→ FLAG: BHVR-39 says to "present modified action times using the health work-speed modifier," but for exploration the villager chooses a fixed duration (60–240 min). It is unclear whether work speed modifies how long the villager actually spends exploring (so a chosen 120 min becomes 240 min at 0.5 work speed) or whether it only affects the displayed mean time per item (and the chosen duration is scheduled as-is, with yield rate implicitly lower).
+    Does work speed change the actual scheduled duration of an exploration action, or only the mean-time-per-item figure shown to the player?
+
+→ FLAG: CONST-106 and CONST-107 list specific calorie costs for exploration activities (50 cal/hr for peaches/sticks/leaves; 100 cal/hr for hunting and woodcutting). Passive satiation decay (CONST-197: 1%/hr ≈ 18 cal/hr) runs continuously via `apply_decay`. It is unclear whether the exploration costs are imposed on top of passive decay (total drain ~68–118 cal/hr while exploring) or whether they replace it during the exploration interval.
+    Do exploration calorie costs (CONST-106, CONST-107) stack with passive satiation decay, or do they substitute for it while the action runs?
+
+→ ISSUE: The `ExploreResource` overview paragraph states "all professions can explore for others (with `4x` mean-time penalty on `PEACHES` for non-`GATHERER` villagers)," but `LOGS` is WOODCUTTER-locked per ATTR-37 and correctly documented as such in the enum comment. The overview claim is false for `LOGS` and is contradicted by the enum comment directly below it.
+
+→ ISSUE: `FINISH_COOKING` exists in `ActionType` and `cooking_actions` references "a paused job exists" as its display condition, but neither Villager State nor World State defines any field to track a paused or in-progress cooking job. `crafting_in_progress` covers crafting only. There is no analogous `cooking_in_progress` (or equivalent) field defined in any subsystem's owned state.
+
+→ ISSUE: `adjust_active_sleep` accepts a `new_modifier` parameter, but the docstring only describes applying wakefulness at `old_modifier` and returning remaining duration. The remaining duration is `total_sleep_minutes − elapsed_minutes` regardless of `new_modifier`. The purpose of passing `new_modifier` into this function is not documented.
+
+→ ISSUE: The Simulation Engine section in subsystem.md and design.md only documents fire *extinction* as the trigger for `adjust_active_sleep`. However, BHVR-161 requires sleep to be split on any modifier change, and CONST-155 ties the modifier to fire state — meaning relighting the fire mid-sleep also changes the modifier and must also trigger `adjust_active_sleep` for all sleeping villagers. The `LIGHT_FIRE` completion path is not addressed.
+
+→ ISSUE: The `AutobalanceMultipliers` comment documents the application formula as `effective_mean = base_mean * profession_factor / (yield_scale * work_speed)`, but `exploration_effective_mean` accepts no `work_speed` argument and `sample_exploration_yield` accepts no `work_speed` argument. If work speed affects exploration yield, it is absent from every function that computes it; if it does not, the comment formula is wrong.
+
+→ ISSUE: `apply_completion_effect` is documented as handling "exploration yield, stat restoration, base storage updates, dirtiness from butchering or carcass rot, and crafting completion." It does not address the per-activity calorie costs for exploration (CONST-106: 50 cal/hr; CONST-107: 100 cal/hr) or the fixed calorie cost for hauling water (CONST-126: 200 cal). These are distinct one-time charges beyond passive satiation decay and have no documented application site.
+
+→ ISSUE: `apply_completion_effect` is documented as applying "dirtiness from butchering or carcass rot," but CONST-133 (+5 dirtiness per cooked meat eaten) and CONST-134 (+3 dirtiness per cooked meat cooked) also produce camp dirtiness. Neither eating nor cooking completion handlers are noted as responsible for these increments.
+
+→ ISSUE: `apply_start_effect` is documented as "consumes crafting materials at job start (drawn from inventory then base)." This applies only to `CRAFT_NEW`; `CONTINUE_CRAFTING` resumes an existing job and must not consume materials again. The docstring does not make this distinction, creating a latent correctness requirement with no guard.
+
+→ ISSUE: `TALK_TO` appears in `ActionType` and is returned by `get_valid_actions`, but `start_action` (which returns a duration for scheduling) and `complete_action` have no documented behaviour for it. The note that "Action System only lists it as a valid action" does not resolve whether Simulation Engine special-cases `TALK_TO` before calling `start_action`, or whether `start_action` is called and returns 0 as a no-op.

@@ -289,3 +289,10 @@ completion text. Domain concerns — JSON parsing, malformed-output retry, promp
 construction — belong to callers (AI Coordinator, Memory System).
 """
 ```
+
+---
+
+→ FLAG: `spec.md` never specifies a temperature for LLM calls. `llm_client.md` sets `temperature = 1.0` for all call types — action selection, conversation turns, memory compaction, and relationship updates all share this single value. Temperature meaningfully shapes character behavior: higher values produce more varied and surprising decisions; lower values produce more consistent, predictable ones. Additionally, different call types have different stakes — a memory compaction summary benefits from low-temperature accuracy, while a conversation turn might benefit from higher-temperature spontaneity.
+    What temperature should LLM calls use?
+
+→ ISSUE: The `complete()` docstring and API surface section both state that `cache_breakpoint_indices` is "validated in debug builds" to enforce "static segments must precede dynamic." The client receives a list of `PromptSegment` objects whose content it does not interpret — it has no semantic basis for determining which segments are static and which are dynamic. The claimed assertion cannot be implemented as described; the client can at most check that the supplied indices are in-bounds integers.

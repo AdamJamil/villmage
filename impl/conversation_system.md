@@ -416,3 +416,57 @@ async def _apply_post_conversation_updates(
 > `ai_coordinator.get_relationship_update` and writes results to Memory System
 > (BHVR-67–71). All social-score and relationship queries for the same participant
 > are issued in parallel.
+
+---
+
+## Flags and Issues
+
+→ FLAG: BHVR-63 defines *when* an ACCEPT is honored (the accepting party's counterpart
+made the last offer) but not *what* transfers. The doc implements a one-directional
+transfer: only the counterpart's last `MAKE_OFFER` items move to the acceptor. The
+acceptor's own pending offer, if any, is not transferred. The spec has separate
+`MAKE_OFFER` and `REQUEST_ITEMS` actions, suggesting bilateral exchange may be intended,
+but nothing in the spec confirms it.
+
+    When a trade is accepted, does only the counterpart's last `MAKE_OFFER` transfer to
+    the acceptor, or do both parties' most recent offers transfer simultaneously?
+
+→ FLAG: BHVR-65 ("ask each villmager"), BHVR-66 (social joy update), and BHVR-73
+("+20 connectedness") do not specify whether villagers who leave mid-conversation
+receive these updates. The doc excludes leavers from all post-conversation queries;
+the +20 connectedness boost applies only to the `participant_ids` list, from which
+leavers have already been removed.
+
+    Should a villager who leaves mid-conversation receive any post-conversation updates
+    (social joy delta, +20 connectedness, relationship impression updates)?
+
+→ FLAG: BHVR-50 says "Resolve the next actor using the listed priority order" without
+citing a source. VRBTM-46 lists conversation actions as numbered options 1–9, but that
+numbering is the JSON `idx` field, not a declared priority ordering. Taking it literally
+as priority order would place SILENT (option 2) above INTERACT (option 3) and TRADE
+(option 9) last — neither of which matches the doc's ordering (LEAVE > INTERACT > TRADE
+> INTERRUPT > CONTINUE > RESPOND > CHANGE_TOPIC > CASUAL > SILENT).
+
+    What is the intended priority order for resolving concurrent conversation actions?
+
+→ FLAG: BHVR-44 says "When a villmager is pulled into a conversation, pause their task
+gracefully and resume it when the conversation ends or they choose to leave." VRBTM-42
+presents the bystander join prompt as a voluntary choice ("Do you want to stop your work
+and join?"). It is unclear whether "pulled into" is limited to the original target (who
+had no choice) or also applies to bystanders who voluntarily opt in.
+
+    Does BHVR-44's task-pause-and-resume requirement apply to bystanders who voluntarily
+    join a conversation?
+
+→ ISSUE: The post-conversation flow description says `social_joy_delta = score − 5`
+applied as a delta, with the delta "clamped to [0, 100]." BHVR-66 specifies clipping
+the *result* (social_joy + delta) into [0, 100], not the delta itself. These differ:
+for `social_joy = 3, score = 0`, clipping the delta yields `social_joy = 3`; clipping
+the result yields `social_joy = 0`. The spec is correct; the doc's phrasing is wrong.
+
+→ ISSUE: `run_conversation` returns only elapsed game minutes. If the original target
+(or a bystander, depending on FLAG resolution above) has an in-progress base action
+(crafting, cooking) when the conversation begins, their Simulation Engine completion
+event is not paused. Conversation System has no channel to signal Simulation Engine to
+remove and reschedule those events forward by the conversation's duration. The current
+API cannot implement BHVR-44's "pause their task gracefully and resume it."

@@ -430,3 +430,22 @@ def get_memory_context(self, villager_id: str) -> VillagerMemoryContext:
     """Assemble and return all memory tiers, active log, and relationships for prompt construction.
     Called by AI Coordinator immediately before rendering the action-selection prompt."""
 ```
+
+---
+
+## Flags and Issues
+
+→ FLAG: BHVR-251 triggers short-term compaction unconditionally when a villager goes to sleep, but `active_context_log` may be empty at that moment (e.g., forced sleep immediately after waking before any action or thought is recorded). The spec does not address this case.
+    Should short-term compaction be skipped when `active_context_log` is empty, or should it always proceed?
+
+→ FLAG: At midnight, medium-term compaction only collects already-formed short-term memories from the previous calendar day. Events still sitting in a villager's `active_context_log` that occurred on the previous day but haven't yet been short-term-compacted (e.g., from a hunting trip that completed after midnight) are excluded and would end up tagged to the current day when short-term compaction eventually fires. The spec does not address this.
+    Should midnight first trigger short-term compaction for all villagers before running medium-term compaction, or is it acceptable for previous-day context-log events to carry over and be compacted under the current day?
+
+→ FLAG: BHVR-67 says "each villmager updates their relationship with every other villmager" after a conversation, and BHVR-68 says this applies "for each ordered pair (x, y) where x ≠ y" — taken literally, all 30 pairs update regardless of who participated. VRBTM-69 scopes its prompt to "in this conversation," and the subsystem and design docs both say "per-other-participant impression," implying only participant pairs update.
+    Does relationship updating after a conversation apply only to ordered pairs where both x and y were participants, or to all 30 pairs?
+
+→ ISSUE: `trigger_short_term_compaction` and `trigger_midnight_compaction` have conflicting signatures between the two sections of this document. In "Step 1 — Core Functions," `trigger_short_term_compaction` includes `game_time: int` and `trigger_midnight_compaction` includes `current_game_time: int`; both parameters are absent from the "API Surface" section.
+
+→ ISSUE: The "Key Logic Notes — Compaction Triggers" section states that after short-term compaction fires, Simulation Engine calls `VillagerState.reset_compaction_counter()`, and internally relies on an `awake_minutes_since_compaction` counter. Neither this method nor this field appears anywhere in the Villager State design or subsystem documentation. The ownership and API for this counter are undefined across subsystem boundaries.
+
+→ ISSUE: The "Persistence and Snapshots" section states Memory System serializes state "to a single `.json` checkpoint file," implying it writes to disk directly. The `trigger_snapshot` API surface returns `dict[str, object]`, and the same paragraph states "Simulation Engine coordinates the combined write." All three statements cannot simultaneously be true.

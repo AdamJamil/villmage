@@ -596,3 +596,24 @@ Update the rest buff timestamp after a "Sit and relax" action completes (BHVR-11
 def reset_compaction_counter(self) -> None:
 ```
 Zero `awake_minutes_since_compaction`. Called by Simulation Engine immediately after it triggers a Memory System compaction for this villager.
+
+---
+
+## Flags and Issues
+
+→ FLAG: The spec includes VRBTM-style tier descriptions for every stat except safety. The `get_stat_descriptions` implementation marks safety descriptions as "TODO: confirm." Without spec-authored text, the implementation must invent tiers — which is a creative/functional vision decision.
+    What should the description tiers for the safety score be?
+
+→ FLAG: BHVR-268 requires always including the description for the highest-partial-derivative mood subcomponent. `MoodSubcomponent.REST` has no dedicated VRBTM description table. The implementation resolves this by omitting the extra description line when REST is dominant — directly violating BHVR-268.
+    When REST is the dominant mood input, what description (if any) should be surfaced in the prompt?
+
+→ FLAG: BHVR-266 says "when a satchel is in a villmager's inventory, their carry capacity is increased by 30kg" with no stacking rule stated. A crafter could accumulate multiple satchels over time. The implementation treats this as a binary check (≥1 satchel → +30 kg), capping the bonus at one satchel regardless of count.
+    Does carrying more than one satchel grant additional capacity, or is the bonus fixed at +30 kg regardless of satchel count?
+
+→ ISSUE: `connectedness` is declared as `i32` in the VillagerState struct but drains at `100/48 ≈ 2.083/hr` — a non-integer rate. Every other passive drain is an exact integer per hour; connectedness is the exception. Applying `(100/48) * elapsed_hours` to an integer field truncates on each step and accumulates drift over a game day.
+
+→ ISSUE: The spec (BHVR-174) says to "select the subcomponent with the highest partial derivative." REST's partial derivative w.r.t. `r` is `−0.06` when `r < 5` — negative, because larger `r` harms mood. All other mood inputs have positive partial derivatives, so signed comparison means REST can never be the highest. The implementation uses magnitude (`0.06`) for REST without stating this departure from the spec's signed framing or documenting what "highest" means in this mixed-sign context.
+
+→ ISSUE: Safety is correctly uncapped (can exceed 1.0 with large stockpiles), but this propagates into well-being: `(mood^2 * health^3 * max(0.3, safety))^(1/7)`. When mood ≈ 1 and health ≈ 1 and safety > 1, well-being exceeds 1.0 and falls above all VRBTM-170 tiers (which top out at [85-100] on a 0–100 scale). `get_stat_descriptions` will silently produce no tier match for this case.
+
+→ ISSUE: `compute_stats` takes `base_fuel_minutes: int`, but WorldState's documented getter is `get_total_firewood`. Converting the fuel queue — sticks (CONST-264: 1 min each) and firewood (CONST-116: 20 min each) — into total burn minutes is not assigned to any subsystem. The caller (Simulation Engine) would need to read WorldState and do this conversion before calling `compute_stats`, but that responsibility appears nowhere.

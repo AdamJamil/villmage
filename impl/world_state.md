@@ -345,3 +345,21 @@ def has_placed_spot(self, villager_id: str) -> bool:
 def get_base_summary(self) -> BaseSummary:
     """Return a structured snapshot of all base state for AI Coordinator prompt assembly. BaseSummary is a dataclass (defined in this module) containing: storage counts, water supply, fire state, total dirtiness, live carcass count, and placed resting spots."""
 ```
+
+---
+
+## Flags And Issues
+
+→ FLAG: CONST-204 says "convert base firewood to total burn minutes" for the firewood safety score. The implementation (`get_total_stored_fuel_minutes`) counts both FIREWOOD and STICK items from base storage, since both are combustible fuel. However, the spec consistently treats FIREWOOD and STICK as distinct item types and names only "firewood" in CONST-204. It is unclear whether "firewood" there refers to the FIREWOOD item type specifically or all fuel items.
+    Should sticks in base storage count toward the firewood safety score, or only FIREWOOD items?
+
+→ FLAG: `get_total_stored_fuel_minutes` counts only fuel items in base_storage. When a villager adds fuel to the fire, those items are removed from base_storage and placed in the fire queue — so they are excluded from the safety score. A party that has pre-loaded 4 hours of fuel into the fire but holds nothing in base_storage would show a safety score of zero. It is unclear whether CONST-204's "base firewood" is meant to mean the stockpile only or all committed fuel.
+    Should fuel already loaded into the fire queue count toward the firewood safety score?
+
+→ ISSUE: `water_supply_liters` is declared as `i32` (integer liters), but CONST-165 specifies washing costs 500 mL (0.5 L), which cannot be represented as a whole liter. Water supply must be stored in mL to handle this precisely.
+
+→ ISSUE: `WorldState` has no field for an auto-incrementing carcass ID counter. `add_carcass` promises to return a unique auto-incremented ID, but the struct definition provides no `next_carcass_id` or equivalent field. The counter mechanism is unspecified.
+
+→ ISSUE: `extinguish_fire` documents that it sets the fire unlit and preserves the fuel queue, but does not state that `extinction_timestamp` is cleared to `None`. The Fire struct invariant implies this ("`extinction_timestamp` is set iff `lit == true`"), but the function contract is silent on it.
+
+→ ISSUE: `get_base_summary` takes no parameters, but producing a meaningful fire status — specifically remaining burn minutes — requires `current_time` to compute `extinction_timestamp - current_time`. The function signature and `BaseSummary` description leave unresolved whether `BaseSummary` exposes the raw `extinction_timestamp` (requiring callers to subtract current time themselves) or a pre-computed remaining-minutes value (requiring `current_time` as a parameter).

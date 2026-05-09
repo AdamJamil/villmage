@@ -468,3 +468,20 @@ async function loadAllCheckpoints(dataDir: string): Promise<CheckpointRecord[]>
 async function loadDeltaIndex(dataDir: string): Promise<Map<number, DeltaRecord[]>>
 // Read state_deltas.jsonl and return records grouped by game_time for O(1) replay lookup.
 ```
+
+---
+
+## Flags and Issues
+
+→ FLAG: BHVR-11 says a villager can see "all base events that occurred while they were both at base and awake," but "base event" is never defined. The event log is perspective-filtered at write time, so this definition gates which events Memory System receives per villager. Candidates include: another villager completing a base action (storing food, tending the fire), the fire extinguishing, a carcass rotting, a villager dying, a villager waking up, world-state mutations caused by someone at base. Without a precise definition the write-time filter cannot be implemented.
+    What exactly counts as a "base event" that a villager at base and awake can observe?
+
+→ ISSUE: The viewer is described as "No server required; open directly in a browser," but `loadAllCheckpoints` and `loadDeltaIndex` must list directories and read arbitrary files from the local filesystem via a `dataDir` path. Modern browsers block `fetch()` and `XMLHttpRequest` for `file://` URLs due to the same-origin policy, making programmatic local file access impossible without either a local HTTP server or a non-browser delivery mechanism (e.g., inlining data or `<input type="file">`). The "no server" constraint directly contradicts the file-loading design.
+
+→ ISSUE: `DeltaRecord.changes` (field 4) is declared without `optional` and its description states "always non-empty," but `MEMORY_UPDATE` records carry no `FieldChange` entries — only `memory_kind`, `content`, and `subject_id` are populated. The struct conflates two incompatible payload shapes: for `MEMORY_UPDATE`, `changes` would have to be an empty list, which contradicts the "always non-empty" invariant. The field should be marked `optional` and the invariant scoped to the three non-memory delta kinds.
+
+→ ISSUE: `VillagerViewerState` field numbering jumps from field 16 (`medium_term_memory_texts`) directly to field 18 (`relationship_descriptions`), skipping field 17. The missing field is almost certainly `long_term_memory_texts`, which is tracked in `VillagerMemoryCheckpoint` but is absent from the viewer's display state. Either the field was accidentally dropped or the omission was intentional; in the latter case the checkpoint storing long-term memories is inconsistent with the viewer never surfacing them.
+
+→ ISSUE: `scrollToEvent` "applies all deltas between the old and new game_time," which only works when scrolling forward. Backward scrolling — moving to an earlier event — requires replaying from a checkpoint, not un-applying deltas. The function as specified has no branch for `new_game_time < old_game_time` and would produce wrong state on backward scroll. `reconstructStateAt` handles arbitrary target times correctly and should be called instead of incremental delta application whenever the target time is earlier than the current position.
+
+→ ISSUE: `append_delta`'s docstring says "Called by Simulation Engine on every state mutation," but Action System directly mutates both World State (`modify_base_item`, `add_fire_fuel`, `modify_water`, `update_cleanliness_source`) and Villager State (`modify_inventory`, `modify_stat`, `set_crafting_state`) without going through Simulation Engine. Simulation Engine only calls Action System's high-level entry points (`start_action`, `complete_action`); it does not intercept the lower-level setter calls. The docstring attribution is wrong: `append_delta` must be callable by any subsystem that performs a mutation, or the World State and Villager State setters must call it directly.

@@ -352,3 +352,20 @@ def _sync_fire_event(self) -> None:
     WorldState's derived extinction timestamp if the fire is lit with remaining fuel;
     leaves it cancelled otherwise."""
 ```
+
+---
+
+## Flags and Issues
+
+→ FLAG: BHVR-192 says "when wakefulness hits 0, the villmager falls asleep and their existing task is cancelled." Conversations block the simulation entirely — no decay fires mid-conversation. If a villager's wakefulness would reach 0 during a conversation (only detectable post-hoc when the next ACTION_COMPLETE applies decay), they participate through the full conversation and get force-slept only after it ends.
+    Should a villager who would hit wakefulness 0 mid-conversation be force-slept immediately (interrupting the conversation), or is it acceptable for them to participate fully and get force-slept after the conversation concludes?
+
+→ ISSUE: The numbered steps of ACTION_COMPLETE and its docstring describe different behavior. Step 3 covers only BHVR-252 (compact if ≥4h awake), but the docstring also describes BHVR-251 compaction ("if the next selected action is sleep") — which requires knowing the chosen action and therefore must happen after step 4, not at step 3. No such post-step-4 compaction step exists. The docstring also mentions "recalculates safety on wake-from-sleep" as a distinct behavior with no corresponding numbered step.
+
+→ ISSUE: Step 2 of ACTION_COMPLETE calls `complete_action(villager_id)` unconditionally. At t=360, all six initial ACTION_COMPLETE events fire with no prior action to complete. No guard for this initial-state case is described, leaving `complete_action`'s behavior on a villager with no current action undefined here.
+
+→ ISSUE: MIDNIGHT handler step 4 ("Recalculate safety for any villager who has woken up since the last safety recalc") contradicts the design resolution that safety recalculates per-villager on wake, not on a global clock. If wake-triggered recalculation is implemented correctly everywhere, this step is unreachable. The parenthetical justification ("midnight is a natural point to ensure no one is stale") directly contradicts the deliberate design choice.
+
+→ ISSUE: `awake_minutes_since_compaction` is referenced in ACTION_COMPLETE step 3, and `reset_compaction_counter` is listed in the engine overview's call list against VillagerState — but neither field nor counter appears in any subsystem's defined data schema. VillagerState's owned data in both design.md and subsystem.md has no such field.
+
+→ ISSUE: `run()` says it "runs until the heap is empty (all villagers dead)." MIDNIGHT and CHECKPOINT handlers each self-reschedule their next event unconditionally, so the heap never becomes empty regardless of villager count. The termination condition must be "all villagers dead," not heap emptiness.

@@ -696,3 +696,19 @@ def get_relationship_update(
     """Get the speaker's updated impression of the subject after a conversation.
     Reads existing relationship data from `memory_system` to populate the prompt."""
 ```
+
+---
+
+## Flags and Issues
+
+→ FLAG: BHVR-249 says "each time villmagers are prompted for their next action, also ask them to generate a very short thought and append it to the log." Conversation turns also prompt villagers to pick an action (ConvActionType). Whether "action" in BHVR-249 means only world-action prompts (select_action) or also conversation turn prompts is unresolved. ConversationTurnResult currently has no thought field, and no thought capture prompt is described for conversation turns.
+    Should thought capture (VRBTM-250) be included in conversation turn prompts, with thoughts appended to the villager's log?
+
+→ FLAG: BHVR-65 says "at the end of a conversation, ask each villmager" for their social score and relationship updates. A villager may exit the conversation early via LEAVE. Whether early-exit villagers are still prompted for the post-conversation social score and relationship updates at the conversation's end is unresolved.
+    Should villagers who left a conversation early still be prompted for social score and relationship updates when the conversation eventually ends?
+
+→ ISSUE: `parse_trade_turn` documents validation of item presence and inventory sufficiency, but does not mention enforcing BHVR-63 — that ACCEPT is only valid when the other party's last recorded action is MAKE_OFFER. The full trade history is available in `TradeSnapshot`, but the parser description omits this check. If the LLM returns ACCEPT out of sequence, it passes through undetected.
+
+→ ISSUE: `assemble_conversation_turn` includes `memory_context` but no current stat values or inventory. During conversation, a villager deciding whether to offer items, request food, or comment on their own condition has only indirect access through whatever recent events appear in their log — not their actual live state. This creates a gap between what the character would know and what the prompt tells them.
+
+→ ISSUE: `assemble_social_score` takes only `own_canon` and `snapshot`, with no access to the villager's prior relationship data for the participants. A villager's satisfaction with a conversation is shaped by their history with those people (e.g., a deeply distrusted participant makes even a neutral exchange feel sour). The existing relationship descriptions and impressions are available in Memory System but are not passed to this prompt.

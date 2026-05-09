@@ -140,6 +140,8 @@ character_canon/
 #### `Profession`
 Six-value enum covering every profession tag in the system. Callers (primarily Action System) use these tags to gate exploration types, crafting recipes, and cooking actions. `BUILDER` has no mechanical effect — it is a real tag but gates nothing. `GATHERER` is the only tag that grants a waiver (the 4× peach-exploration penalty exemption for Maren).
 
+→ ISSUE: The opening line says callers use profession tags "to gate exploration types, crafting recipes, and cooking actions." This is inaccurate for `GATHERER`: peach exploration is not gated — any non-gatherer can still explore for peaches, just at 4× the time cost. Saying tags "gate" exploration implies locked access, not a speed penalty. The description conflates two distinct mechanics (access gating vs. timing modification) and should distinguish between them.
+
 #### `VillagerCanon`
 Frozen dataclass holding the complete static identity of one villager: stable `id` key, display `name`, `bio` (exposed to other villagers' prompts), `personality` and `desires` (exposed only to the villager's own prompt), and `profession` tag. All fields are set at authoring time; nothing in the simulation mutates them.
 
