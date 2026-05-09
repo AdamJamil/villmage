@@ -332,8 +332,8 @@ def get_total_edible_calories(self) -> int:
 ```
 
 ```python
-def get_total_stored_fuel_minutes(self) -> int:
-    """Return total burn minutes from base_storage fuel items (firewood × 20 + sticks × 1). Excludes the active fire queue. Used for the firewood safety score per CONST-204."""
+def get_total_fuel_minutes(self, current_time: int) -> int:
+    """Return total burn minutes from all combustible fuel: base_storage fuel items (firewood × 20 + sticks × 1) plus remaining fuel in the active fire queue. Used for the firewood safety score per CONST-204."""
 ```
 
 ```python
@@ -349,12 +349,6 @@ def get_base_summary(self) -> BaseSummary:
 ---
 
 ## Flags And Issues
-
-→ FLAG: CONST-204 says "convert base firewood to total burn minutes" for the firewood safety score. The implementation (`get_total_stored_fuel_minutes`) counts both FIREWOOD and STICK items from base storage, since both are combustible fuel. However, the spec consistently treats FIREWOOD and STICK as distinct item types and names only "firewood" in CONST-204. It is unclear whether "firewood" there refers to the FIREWOOD item type specifically or all fuel items.
-    Should sticks in base storage count toward the firewood safety score, or only FIREWOOD items?
-
-→ FLAG: `get_total_stored_fuel_minutes` counts only fuel items in base_storage. When a villager adds fuel to the fire, those items are removed from base_storage and placed in the fire queue — so they are excluded from the safety score. A party that has pre-loaded 4 hours of fuel into the fire but holds nothing in base_storage would show a safety score of zero. It is unclear whether CONST-204's "base firewood" is meant to mean the stockpile only or all committed fuel.
-    Should fuel already loaded into the fire queue count toward the firewood safety score?
 
 → ISSUE: `water_supply_liters` is declared as `i32` (integer liters), but CONST-165 specifies washing costs 500 mL (0.5 L), which cannot be represented as a whole liter. Water supply must be stored in mL to handle this precisely.
 

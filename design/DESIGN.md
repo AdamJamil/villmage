@@ -180,8 +180,8 @@ Multi-villager conversation and trade protocol.
 **Logic:**
 - Turn loop: all participants prompted in parallel; winning action selected by priority (leave > significant > trade > interrupt > continue > respond > topic change > casual > silent), recency tiebreak. One action resolves per turn; others discarded (except concurrent leaves). 5 minutes per turn; ends at 60 minutes or one participant left. **Exception: turn 1 queries only the initiating villmager (BHVR-52).**
 - After turn 2: non-participants at base get a join prompt with the opening excerpt.
-- Trade sub-protocol: alternates between two participants; zero game time per trade turn; accepts when one party accepts and the other's last action was an offer; cancels after 6 turns without mutual acceptance.
-- Post-conversation: each participant gives a 0–10 social score and per-other impression. Social joy update (`val − 5`, clipped 0–100) written to Villager State; impressions and relationship description updates written to Memory System. A flat **+20 connectedness** boost is also applied to all participants (BHVR-73).
+- Trade sub-protocol: alternates between two participants; zero game time per trade turn; accepts when one party accepts and the other's last action was an offer — on acceptance, both parties' most recent offers transfer simultaneously; cancels after 6 turns without mutual acceptance.
+- Post-conversation: each participant (including villagers who left mid-conversation) gives a 0–10 social score and per-other-participant impression. Social joy update (`val − 5`, clipped 0–100) written to Villager State; impressions and relationship description updates written to Memory System. A flat **+20 connectedness** boost is also applied to all participants (BHVR-73). Bystanders who voluntarily join have their task paused and resumed on exit, same as the original target (BHVR-44).
 
 **Ambiguities:**
 
@@ -214,9 +214,9 @@ Per-villager event logs, thoughts, relationships, and tiered memory compaction.
 - `get_memory_context(villager_id)` → assembled memories + relationships + context log for prompt
 
 **Logic:**
-- Short-term compaction: triggered by sleep or completing an action after ≥4 hours awake since last compaction. Submits context log to LLM, stores ≤128-token summary, clears context log.
-- Medium-term compaction: midnight. Submits all previous-day short-term memories to LLM, stores ≤256-token summary.
-- Long-term compaction: beyond day 3, compacts all medium-term memories.
+- Short-term compaction: triggered by sleep (skipped if context log is empty) or completing an action after ≥4 hours awake since last compaction. Submits context log to LLM, stores ≤128-token summary, clears context log.
+- Medium-term compaction: midnight. First forces short-term compaction for any villager with uncompacted events. Then submits all previous-day short-term memories to LLM, stores ≤256-token summary.
+- Long-term compaction: every third day (day 3, 6, 9, etc.). First forces medium-term compaction. Then compacts all medium-term memories since the last long-term compaction.
 - Total memory budget per villager: ≤2k tokens.
 
 **Ambiguities:**
@@ -264,7 +264,7 @@ Prompt assembly, LLM invocation, response parsing.
 Thin API wrapper.
 
 **Data owned:**
-- None. Model, temperature, and token limits fixed at construction.
+- None. Model, per-call-type temperature (action selection `0.7`, conversation turns `1.0`, memory compaction `0.2`, relationship updates `0.4`), and token limits fixed at construction.
 
 **APIs exposed:**
 - `complete(prompt_segments, cache_breakpoint_indices)` → raw completion string
@@ -301,7 +301,7 @@ Replay surface and persistence.
 
 - *Perspective-specific visibility definition.* BHVR-11 allows viewing each character's perspective. What exactly can each character observe? Presumably: their own actions and stats, any events at base while they are at base, any conversation they participated in, and explicitly nothing from when they were away. This needs a precise filter definition before the event log schema can be locked in.
 
-**Resolution:** A villager sees their own actions always, conversations they participated in, and all base events while they were both present and awake. Sleeping at base or being away = invisible.
+**Resolution:** A villager sees their own actions always, conversations they participated in, and all base events while they were both present and awake. A "base event" is any event that occurs at base — everything except exploration and water-hauling activities. Sleeping at base or being away = invisible.
 
 ---
 

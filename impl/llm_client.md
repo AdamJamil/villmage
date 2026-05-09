@@ -64,15 +64,20 @@ struct LLMResponse {
 
 ### LLMConfig
 
-Construction-time configuration. Fixed for the lifetime of the client instance; all calls from a single `LLMClient` share these parameters.
+Construction-time configuration. Fixed for the lifetime of the client instance. Temperature varies by call type (CONST-290): callers pass the appropriate temperature per invocation.
 
 ```thrift
 struct LLMConfig {
     1: string model = "gemini-2.5-flash",
-    2: double temperature = 1.0,
     3: i32 max_output_tokens = 2048,
 }
 ```
+
+**Call-type temperatures (CONST-290):**
+- Action selection: `0.7`
+- Conversation turns: `1.0`
+- Memory compaction: `0.2`
+- Relationship updates: `0.4`
 
 **Notes:**
 - `max_output_tokens = 2048` is sufficient for all call types in this system: action selection JSON is ~100–200 tokens, compaction summaries are ≤256 tokens, conversation turns are short.
@@ -83,8 +88,8 @@ struct LLMConfig {
 
 ## API Surface
 
-- `complete(segments: list[PromptSegment], cache_breakpoint_indices: list[int]) -> LLMResponse`
-  — Async Trio coroutine. Assembles the Gemini request, submits it, retries on transient errors, and returns the raw response.
+- `complete(segments: list[PromptSegment], cache_breakpoint_indices: list[int], temperature: float) -> LLMResponse`
+  — Async Trio coroutine. Assembles the Gemini request at the given temperature, submits it, retries on transient errors, and returns the raw response.
 
 **`cache_breakpoint_indices`:** Indices into `segments` marking the end of static/cacheable prefixes (e.g., `[3]` means segments 0–3 are the static prefix). The design decision is **implicit prefix caching only** — no explicit Gemini `CachedContent` API calls are made. These indices do not change runtime behavior; they document the static/dynamic boundary so callers declare their caching intent and so the ordering contract is machine-checkable. Callers must place static segments before dynamic ones; the client asserts this in debug builds.
 
@@ -190,8 +195,9 @@ async def complete(
     self,
     segments: list[PromptSegment],
     cache_breakpoint_indices: list[int],
+    temperature: float,
 ) -> LLMResponse:
-    """Submit a prompt to Gemini and return the raw completion.
+    """Submit a prompt to Gemini at the given temperature and return the raw completion.
 
     SYSTEM segments are concatenated and sent as system_instruction.
     USER/MODEL segments become the contents list in order.
@@ -291,8 +297,5 @@ construction — belong to callers (AI Coordinator, Memory System).
 ```
 
 ---
-
-→ FLAG: `spec.md` never specifies a temperature for LLM calls. `llm_client.md` sets `temperature = 1.0` for all call types — action selection, conversation turns, memory compaction, and relationship updates all share this single value. Temperature meaningfully shapes character behavior: higher values produce more varied and surprising decisions; lower values produce more consistent, predictable ones. Additionally, different call types have different stakes — a memory compaction summary benefits from low-temperature accuracy, while a conversation turn might benefit from higher-temperature spontaneity.
-    What temperature should LLM calls use?
 
 → ISSUE: The `complete()` docstring and API surface section both state that `cache_breakpoint_indices` is "validated in debug builds" to enforce "static segments must precede dynamic." The client receives a list of `PromptSegment` objects whose content it does not interpret — it has no semantic basis for determining which segments are static and which are dynamic. The claimed assertion cannot be implemented as described; the client can at most check that the supplied indices are in-bounds integers.

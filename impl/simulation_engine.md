@@ -285,8 +285,10 @@ def _handle_action_complete(self, villager_id: str) -> None:
     ACTION_COMPLETE. When the chosen action is 'Talk to someone', calls
     run_conversation synchronously — after it returns, cancels stale ACTION_COMPLETE
     events for every non-initiator participant and reschedules them at
-    old_completion_timestamp + elapsed_conversation_minutes. Calls _sync_fire_event
-    after any action that may modify fire state."""
+    old_completion_timestamp + elapsed_conversation_minutes. Conversations block the
+    simulation; if a villager's wakefulness would reach 0 during a conversation, they
+    participate through the full conversation and are force-slept afterward (BHVR-192).
+    Calls _sync_fire_event after any action that may modify fire state."""
 ```
 
 ```python
@@ -356,9 +358,6 @@ def _sync_fire_event(self) -> None:
 ---
 
 ## Flags and Issues
-
-→ FLAG: BHVR-192 says "when wakefulness hits 0, the villmager falls asleep and their existing task is cancelled." Conversations block the simulation entirely — no decay fires mid-conversation. If a villager's wakefulness would reach 0 during a conversation (only detectable post-hoc when the next ACTION_COMPLETE applies decay), they participate through the full conversation and get force-slept only after it ends.
-    Should a villager who would hit wakefulness 0 mid-conversation be force-slept immediately (interrupting the conversation), or is it acceptable for them to participate fully and get force-slept after the conversation concludes?
 
 → ISSUE: The numbered steps of ACTION_COMPLETE and its docstring describe different behavior. Step 3 covers only BHVR-252 (compact if ≥4h awake), but the docstring also describes BHVR-251 compaction ("if the next selected action is sleep") — which requires knowing the chosen action and therefore must happen after step 4, not at step 3. No such post-step-4 compaction step exists. The docstring also mentions "recalculates safety on wake-from-sleep" as a distinct behavior with no corresponding numbered step.
 

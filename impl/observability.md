@@ -12,7 +12,7 @@ reads persisted files only.
 
 Three things are persisted to disk by other subsystems:
 1. **Per-villager event logs** — written by Memory System as `events/{villager_id}.jsonl`
-   (EventLogEntry records, perspective-filtered at write time).
+   (EventLogEntry records, perspective-filtered at write time). A villager sees their own actions always, conversations they participated in, and all base events while at base and awake. A "base event" is any event that occurs at base — everything except exploration and water-hauling activities.
 2. **State deltas** — written by Simulation Engine as `state_deltas.jsonl` (DeltaRecord
    records, one per state change).
 3. **Checkpoint snapshots** — written by Simulation Engine as `checkpoints/{game_time}.json`
@@ -472,9 +472,6 @@ async function loadDeltaIndex(dataDir: string): Promise<Map<number, DeltaRecord[
 ---
 
 ## Flags and Issues
-
-→ FLAG: BHVR-11 says a villager can see "all base events that occurred while they were both at base and awake," but "base event" is never defined. The event log is perspective-filtered at write time, so this definition gates which events Memory System receives per villager. Candidates include: another villager completing a base action (storing food, tending the fire), the fire extinguishing, a carcass rotting, a villager dying, a villager waking up, world-state mutations caused by someone at base. Without a precise definition the write-time filter cannot be implemented.
-    What exactly counts as a "base event" that a villager at base and awake can observe?
 
 → ISSUE: The viewer is described as "No server required; open directly in a browser," but `loadAllCheckpoints` and `loadDeltaIndex` must list directories and read arbitrary files from the local filesystem via a `dataDir` path. Modern browsers block `fetch()` and `XMLHttpRequest` for `file://` URLs due to the same-origin policy, making programmatic local file access impossible without either a local HTTP server or a non-browser delivery mechanism (e.g., inlining data or `<input type="file">`). The "no server" constraint directly contradicts the file-loading design.
 

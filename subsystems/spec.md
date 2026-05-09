@@ -413,7 +413,7 @@ You are currently <action>. <villmager 1> and <villmager 2> are having a convers
 
 BHVR-43: When at base, a villmager may initiate a conversation with one other villmager who is also at base, awake, and not exploring or hauling water.
 
-BHVR-44: When a villmager is pulled into a conversation, pause their task gracefully and resume it when the conversation ends or they choose to leave.
+BHVR-44: When a villmager is pulled into a conversation — whether as the original target or a bystander who voluntarily joins — pause their task gracefully and resume it when the conversation ends or they choose to leave.
 
 BHVR-45: When a conversation reaches two turns, other villagers at base are prompted to optionally join with a brief description of the conversation.
 
@@ -443,7 +443,7 @@ CONST-48: Options `3-8` require `{"resp": str (action or speech)}` under `args`.
 
 CONST-49: Trading requires `{"target": str (villmager name)}` under `args`.
 
-BHVR-50: Resolve the next actor using the listed priority order; break ties by who has spoken least recently.
+BHVR-50: Resolve the next actor using priority order: LEAVE > INTERACT > TRADE > INTERRUPT > CONTINUE > RESPOND > CHANGE_TOPIC > CASUAL > SILENT. Break ties by who has spoken least recently.
 
 BHVR-51: Discard all other villagers' turn inputs for that turn unless they are also leaving.
 
@@ -476,7 +476,7 @@ BHVR-61: Each trade turn does not take time.
 
 BHVR-62: Cancel a trade automatically after 6 turns without both parties accepting.
 
-BHVR-63: Accept a trade only when one party accepts and the other party was the last to make an offer.
+BHVR-63: Accept a trade only when one party accepts and the other party was the last to make an offer. On acceptance, both parties' most recent offers transfer simultaneously.
 
 ### Social And Relationship Updates
 
@@ -484,13 +484,13 @@ VRBTM-64:
 
 How did that conversation make you feel? {"val": int (0-10)}
 
-BHVR-65: At the end of a conversation, ask each villmager for that response.
+BHVR-65: At the end of a conversation, ask each villmager who participated for that response, including villagers who left mid-conversation.
 
 BHVR-66: Add `val - 5` to the villmager's social score and clip the result into the `0-100` range.
 
-BHVR-67: After a conversation, each villmager updates their relationship with every other villmager.
+BHVR-67: After a conversation, each participant updates their relationship with every other participant.
 
-BHVR-68: Apply that update for each ordered pair `(x, y)` where `x ≠ y`.
+BHVR-68: Apply that update for each ordered pair `(x, y)` where both `x` and `y` participated in the conversation and `x ≠ y`.
 
 VRBTM-69:
 
@@ -502,7 +502,7 @@ BHVR-70: Add the new `impression` to `x`'s 3 most recent impressions of `y`.
 
 BHVR-71: If a modified `desc` was outputted, replace `x`'s overall relationship description of `y`.
 
-BHVR-73: After a conversation, apply a flat `+20` connectedness update.
+BHVR-73: After a conversation, apply a flat `+20` connectedness update to all participants, including villagers who left mid-conversation.
 
 BHVR-177: Conversations update social joy directly.
 
@@ -710,7 +710,7 @@ VRBTM-253:
 
 BHVR-254: After forming short-term memory, clear the villmager's existing log for future prompts while keeping it recorded elsewhere.
 
-BHVR-255: Form medium-term memories at midnight.
+BHVR-255: Form medium-term memories at midnight. Before running medium-term compaction, first trigger short-term compaction for any villager with uncompacted events in their active context log.
 
 BHVR-256: Convert all short-term memories from the previous day, not the same day, into medium-term memories.
 
@@ -720,7 +720,7 @@ VRBTM-257:
 
 NOTE-258: Long-term memory may not be needed for the expected experiment duration.
 
-BHVR-259: Beyond three days, compact all medium-term memories into long-term memories.
+BHVR-259: Long-term compaction fires every third day (day 3, 6, 9, etc.). Before running long-term compaction, first trigger medium-term compaction. Then compact all medium-term memories since the last long-term compaction into long-term memories.
 
 VRBTM-270:
 

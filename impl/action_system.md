@@ -204,7 +204,7 @@ Per-action-group eligibility checks that inspect Villager State, World State, an
 
 ### `action_system/timing.py`
 
-Duration computation and exploration yield sampling. Contains: modified duration formulas (base time × health work-speed modifier × profession factor), and the Erlang(k=5) sampler used during exploration completion to determine how many items were found. Called by `eligibility.py` (to show modified times in prompts) and `effects.py` (to compute yield on exploration completion).
+Duration computation and exploration yield sampling. Contains: modified duration formulas (base time × health work-speed modifier × profession factor), and the Erlang(k=5) sampler used during exploration completion to determine how many items were found. Work-speed modifies exploration yield rate (mean time per item) but does not change the villager's chosen exploration duration — the villager explores for the selected number of minutes as-is, finding fewer items per hour at lower work speeds (BHVR-289). Exploration calorie costs (CONST-106, CONST-107) are charged on top of passive satiation decay (BHVR-288). Called by `eligibility.py` (to show modified times in prompts) and `effects.py` (to compute yield on exploration completion).
 
 ### `action_system/effects.py`
 
@@ -401,12 +401,6 @@ def adjust_active_sleep(
 ---
 
 ## Flags and Issues
-
-→ FLAG: BHVR-39 says to "present modified action times using the health work-speed modifier," but for exploration the villager chooses a fixed duration (60–240 min). It is unclear whether work speed modifies how long the villager actually spends exploring (so a chosen 120 min becomes 240 min at 0.5 work speed) or whether it only affects the displayed mean time per item (and the chosen duration is scheduled as-is, with yield rate implicitly lower).
-    Does work speed change the actual scheduled duration of an exploration action, or only the mean-time-per-item figure shown to the player?
-
-→ FLAG: CONST-106 and CONST-107 list specific calorie costs for exploration activities (50 cal/hr for peaches/sticks/leaves; 100 cal/hr for hunting and woodcutting). Passive satiation decay (CONST-197: 1%/hr ≈ 18 cal/hr) runs continuously via `apply_decay`. It is unclear whether the exploration costs are imposed on top of passive decay (total drain ~68–118 cal/hr while exploring) or whether they replace it during the exploration interval.
-    Do exploration calorie costs (CONST-106, CONST-107) stack with passive satiation decay, or do they substitute for it while the action runs?
 
 → ISSUE: The `ExploreResource` overview paragraph states "all professions can explore for others (with `4x` mean-time penalty on `PEACHES` for non-`GATHERER` villagers)," but `LOGS` is WOODCUTTER-locked per ATTR-37 and correctly documented as such in the enum comment. The overview claim is false for `LOGS` and is contradicted by the enum comment directly below it.
 

@@ -245,6 +245,10 @@ CONST-106: Exploration for peaches, sticks, and leaves costs `50 cal/hour`.
 
 CONST-107: Hunting and woodcutting cost `100 cal/hour`.
 
+BHVR-288: Exploration calorie costs (CONST-106, CONST-107) are charged on top of passive satiation decay, not in place of it.
+
+BHVR-289: The health work-speed modifier (BHVR-39) affects exploration yield rate (mean time per item) but does not change the villager's chosen exploration duration. The villager explores for the selected number of minutes as-is, finding fewer items per hour at lower work speeds.
+
 ### Resting
 
 BHVR-109: A villmager may choose to do nothing and rest.
@@ -357,7 +361,7 @@ CONST-139: `Split logs into firewood` takes `10m each`.
 
 CONST-141: `Craft a satchel` requires `8h total`, can be progressed in `60-480` minute increments, and consumes `1 processed hide` at the start.
 
-BHVR-266: When a satchel is in a villmager's inventory, their carry capacity is increased by `30kg`.
+BHVR-266: When a satchel is in a villmager's inventory, their carry capacity is increased by `30kg`. Multiple satchels do not stack; the bonus is capped at `+30kg`.
 
 BHVR-267: Crafted items go directly into the crafter's inventory.
 
@@ -421,7 +425,7 @@ You are currently <action>. <villmager 1> and <villmager 2> are having a convers
 
 BHVR-43: When at base, a villmager may initiate a conversation with one other villmager who is also at base, awake, and not exploring or hauling water.
 
-BHVR-44: When a villmager is pulled into a conversation, pause their task gracefully and resume it when the conversation ends or they choose to leave.
+BHVR-44: When a villmager is pulled into a conversation — whether as the original target or a bystander who voluntarily joins — pause their task gracefully and resume it when the conversation ends or they choose to leave.
 
 BHVR-45: When a conversation reaches two turns, other villagers at base are prompted to optionally join with a brief description of the conversation. The conversation pauses while non-participants decide whether to join.
 
@@ -451,7 +455,7 @@ CONST-48: Options `3-8` require `{"resp": str (action or speech)}` under `args`.
 
 CONST-49: Trading requires `{"target": str (villmager name)}` under `args`.
 
-BHVR-50: Resolve the next actor using the listed priority order; break ties by who has spoken least recently.
+BHVR-50: Resolve the next actor using priority order: LEAVE > INTERACT > TRADE > INTERRUPT > CONTINUE > RESPOND > CHANGE_TOPIC > CASUAL > SILENT. Break ties by who has spoken least recently.
 
 BHVR-51: Discard all other villagers' turn inputs for that turn unless they are also leaving.
 
@@ -484,7 +488,7 @@ BHVR-61: Each trade turn does not take time.
 
 BHVR-62: Cancel a trade automatically after 6 turns without both parties accepting.
 
-BHVR-63: Accept a trade only when one party accepts and the other party was the last to make an offer.
+BHVR-63: Accept a trade only when one party accepts and the other party was the last to make an offer. On acceptance, both parties' most recent offers transfer simultaneously.
 
 ### Social And Relationship Updates
 
@@ -492,13 +496,13 @@ VRBTM-64:
 
 How did that conversation make you feel? {"val": int (0-10)}
 
-BHVR-65: At the end of a conversation, ask each villmager for that response.
+BHVR-65: At the end of a conversation, ask each villmager who participated for that response, including villagers who left mid-conversation.
 
 BHVR-66: Add `val - 5` to the villmager's social score and clip the result into the `0-100` range.
 
-BHVR-67: After a conversation, each villmager updates their relationship with every other villmager.
+BHVR-67: After a conversation, each participant updates their relationship with every other participant.
 
-BHVR-68: Apply that update for each ordered pair `(x, y)` where `x ≠ y`.
+BHVR-68: Apply that update for each ordered pair `(x, y)` where both `x` and `y` participated in the conversation and `x ≠ y`.
 
 VRBTM-69:
 
@@ -510,7 +514,7 @@ BHVR-70: Add the new `impression` to `x`'s 3 most recent impressions of `y`.
 
 BHVR-71: If a modified `desc` was outputted, replace `x`'s overall relationship description of `y`.
 
-BHVR-73: After a conversation, apply a flat `+20` connectedness update.
+BHVR-73: After a conversation, apply a flat `+20` connectedness update to all participants, including villagers who left mid-conversation.
 
 BHVR-177: Conversations update social joy directly.
 
@@ -549,6 +553,14 @@ VRBTM-173:
 - [0-10] You feel truly miserable. Every waking moment is hell.
 
 BHVR-174: Compute the partial derivative for each mood variable using the current values, select the subcomponent with the highest partial derivative, and surface only that subcomponent's prompt.
+
+VRBTM-292:
+
+Rest subcomponent descriptions:
+
+- [67-100] You've had time to yourself recently. Your head feels clear.
+- [33-67] It's been a while since you've had a moment to just sit and breathe.
+- [0-33] You've been going nonstop without a break. You're wound tight.
 
 ### Social Joy
 
@@ -616,7 +628,7 @@ BHVR-191: As with mood, use partial-derivative computation to choose which healt
 
 ### Wakefulness
 
-BHVR-192: When wakefulness hits `0`, the villmager falls asleep and their existing task is cancelled.
+BHVR-192: When wakefulness hits `0`, the villmager falls asleep and their existing task is cancelled. Conversations block the simulation; if a villager's wakefulness would reach `0` during a conversation, they participate through the full conversation and are force-slept afterward.
 
 CONST-283: When forced to sleep by BHVR-192, sleep duration is always `4 hours`.
 
@@ -662,9 +674,17 @@ BHVR-201: Recalculate safety per-villager when they wake up (not on a global dai
 
 CONST-202: Food safety score is `((calories in inventory / 2200) + (1 / living villmagers) * (calories in base / 2200)) / 5`.
 
-CONST-204: Firewood safety score: convert base firewood to total burn minutes, assume one night = `8 hours` (`480 minutes`). Firewood safety = `(total_burn_minutes / 480) / 5`. No per-villager split since fire is shared.
+CONST-204: Firewood safety score: convert all combustible fuel (firewood and sticks, both in base storage and already loaded in the fire queue) to total burn minutes, assume one night = `8 hours` (`480 minutes`). Firewood safety = `(total_burn_minutes / 480) / 5`. No per-villager split since fire is shared.
 
 CONST-205: Safety is the average of food safety score and firewood safety score.
+
+VRBTM-291:
+
+- [85-100] You feel secure. There's plenty of food and fuel to last.
+- [50-85] You're not worried. Supplies seem adequate for now.
+- [30-50] Supplies are getting thin. You're starting to worry about what's ahead.
+- [10-30] Stores are nearly gone. You dread what happens when they run out.
+- [0-10] There is almost nothing left. Starvation or freezing feels inevitable.
 
 ### Starting Values
 
@@ -722,7 +742,7 @@ STRCT-247: Villmagers have a log of all recently experienced events that have no
 
 STRCT-248: Thoughts are also included in that log.
 
-BHVR-249: Each time villmagers are prompted for their next action, also ask them to generate a very short thought and append it to the log.
+BHVR-249: Each time villmagers are prompted for their next world action (not conversation turns), also ask them to generate a very short thought and append it to the log.
 
 VRBTM-250:
 
@@ -730,7 +750,7 @@ VRBTM-250:
 
 ### Memory Formation And Compaction
 
-BHVR-251: Form short-term memories when the villmager goes to sleep.
+BHVR-251: Form short-term memories when the villmager goes to sleep. If the active context log is empty, skip compaction; it fires at the next normal trigger instead.
 
 BHVR-252: Form short-term memories when the villmager finishes an action and has been awake for at least `4` hours since last forming a memory.
 
@@ -740,7 +760,7 @@ VRBTM-253:
 
 BHVR-254: After forming short-term memory, clear the villmager's existing log for future prompts while keeping it recorded elsewhere.
 
-BHVR-255: Form medium-term memories at midnight.
+BHVR-255: Form medium-term memories at midnight. Before running medium-term compaction, first trigger short-term compaction for any villager with uncompacted events in their active context log.
 
 BHVR-256: Convert all short-term memories from the previous day, not the same day, into medium-term memories.
 
@@ -750,7 +770,7 @@ VRBTM-257:
 
 NOTE-258: Long-term memory may not be needed for the expected experiment duration.
 
-BHVR-259: Long-term compaction fires every third day (day 3, 6, 9, etc.), compacting all medium-term memories since the last long-term compaction into long-term memories.
+BHVR-259: Long-term compaction fires every third day (day 3, 6, 9, etc.). Before running long-term compaction, first trigger medium-term compaction. Then compact all medium-term memories since the last long-term compaction into long-term memories.
 
 VRBTM-270:
 
@@ -761,6 +781,8 @@ REQ-260: Memory compaction must be extremely aggressive to avoid input-size bloa
 CONST-261: For gemini flash 2.5, the token budget is merely `2k`.
 
 NOTE-262: Without aggressive compaction, memories can blow up to `1e4` order of magnitude.
+
+CONST-290: LLM temperature varies by call type: action selection `0.7`, conversation turns `1.0`, memory compaction `0.2`, relationship updates `0.4`.
 
 ## 8. Prompt Construction
 
@@ -838,7 +860,7 @@ REQ-9: The observability surface is implemented with HTML, CSS, and JavaScript.
 
 ATTR-10: The observability surface uses a dark theme.
 
-BHVR-11: The observability surface allows viewing the event log from each character's perspective. A villmager's perspective includes their own actions always, conversations they participated in, and all base events that occurred while they were both at base and awake. Events during sleep or away time are excluded.
+BHVR-11: The observability surface allows viewing the event log from each character's perspective. A villmager's perspective includes their own actions always, conversations they participated in, and all base events that occurred while they were both at base and awake. A "base event" is any event that occurs at base — everything except exploration and water-hauling activities. Events during sleep or away time are excluded.
 
 BHVR-12: When a villmager takes an action, write an event-log entry and dump/save it.
 

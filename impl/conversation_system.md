@@ -52,9 +52,10 @@ struct ActiveTrade {
   turn loop.
 
 - **Completion:** When ACCEPT is validly honored, Conversation System calls
-  `VillagerState.modify_inventory` on both parties to transfer items immediately
-  (INVR-60). The items transferred are those in the last `MAKE_OFFER` from the accepting
-  party's counterpart.
+  `VillagerState.modify_inventory` on both parties to transfer items simultaneously
+  (INVR-60, BHVR-63). Both parties' most recent `MAKE_OFFER` items are exchanged — the
+  acceptor receives the counterpart's last offer, and the counterpart receives the
+  acceptor's last offer.
 
 - **Zero game time (BHVR-61):** Trade turns do not increment
   `ConversationSession.elapsed_game_minutes`.
@@ -188,25 +189,25 @@ to `full_turn_log`. Convention (affects what is verbatim in prompts and Memory S
 
 After the turn loop ends:
 
-1. For each `villager_id` in `participant_ids` (all who did NOT leave early — they received
-   their post-conversation prompts; villagers who LEAVE mid-conversation do NOT receive
-   post-conversation queries): call `ai_coordinator.get_social_score(villager_id, snapshot,
+1. For each villager who participated in the conversation — including villagers who left
+   mid-conversation (BHVR-65): call `ai_coordinator.get_social_score(villager_id, snapshot,
    game_time)`. Apply `social_joy_delta = score - 5` clamped to [0, 100] via
    `VillagerState.modify_stat("social_joy", delta)` (BHVR-66).
 
-2. Apply `+20 connectedness` to all participants via
+2. Apply `+20 connectedness` to all participants, including early leavers, via
    `VillagerState.modify_stat("connectedness", 20)` (BHVR-73).
 
-3. For every ordered pair `(speaker, subject)` where `speaker != subject` and both are in
-   `participant_ids` at conversation end: call
+3. For every ordered pair `(speaker, subject)` where `speaker != subject` and both
+   participated in the conversation (including early leavers): call
    `ai_coordinator.get_relationship_update(speaker, subject, snapshot, game_time)`.
    Call `memory_system.write_impressions(speaker, subject, impression, desc_update)` with
    the result (BHVR-67–71).
 
-**Leavers:** A villager who chose LEAVE mid-conversation is removed from `participant_ids`
-at that point. They do NOT receive post-conversation social score or relationship update
-queries. Their Memory System log contains all turns up to and including their own leave
-event, since Conversation System appended turn events for them throughout.
+**Leavers:** A villager who chose LEAVE mid-conversation is removed from the active turn
+loop but still receives all post-conversation updates (social score, +20 connectedness,
+relationship impressions). Their social score prompt uses the conversation snapshot as of
+their departure. Their Memory System log contains all turns up to and including their own
+leave event, since Conversation System appended turn events for them throughout.
 
 ### Memory System Event Appending (BHVR-53)
 
@@ -421,43 +422,6 @@ async def _apply_post_conversation_updates(
 
 ## Flags and Issues
 
-→ FLAG: BHVR-63 defines *when* an ACCEPT is honored (the accepting party's counterpart
-made the last offer) but not *what* transfers. The doc implements a one-directional
-transfer: only the counterpart's last `MAKE_OFFER` items move to the acceptor. The
-acceptor's own pending offer, if any, is not transferred. The spec has separate
-`MAKE_OFFER` and `REQUEST_ITEMS` actions, suggesting bilateral exchange may be intended,
-but nothing in the spec confirms it.
-
-    When a trade is accepted, does only the counterpart's last `MAKE_OFFER` transfer to
-    the acceptor, or do both parties' most recent offers transfer simultaneously?
-
-→ FLAG: BHVR-65 ("ask each villmager"), BHVR-66 (social joy update), and BHVR-73
-("+20 connectedness") do not specify whether villagers who leave mid-conversation
-receive these updates. The doc excludes leavers from all post-conversation queries;
-the +20 connectedness boost applies only to the `participant_ids` list, from which
-leavers have already been removed.
-
-    Should a villager who leaves mid-conversation receive any post-conversation updates
-    (social joy delta, +20 connectedness, relationship impression updates)?
-
-→ FLAG: BHVR-50 says "Resolve the next actor using the listed priority order" without
-citing a source. VRBTM-46 lists conversation actions as numbered options 1–9, but that
-numbering is the JSON `idx` field, not a declared priority ordering. Taking it literally
-as priority order would place SILENT (option 2) above INTERACT (option 3) and TRADE
-(option 9) last — neither of which matches the doc's ordering (LEAVE > INTERACT > TRADE
-> INTERRUPT > CONTINUE > RESPOND > CHANGE_TOPIC > CASUAL > SILENT).
-
-    What is the intended priority order for resolving concurrent conversation actions?
-
-→ FLAG: BHVR-44 says "When a villmager is pulled into a conversation, pause their task
-gracefully and resume it when the conversation ends or they choose to leave." VRBTM-42
-presents the bystander join prompt as a voluntary choice ("Do you want to stop your work
-and join?"). It is unclear whether "pulled into" is limited to the original target (who
-had no choice) or also applies to bystanders who voluntarily opt in.
-
-    Does BHVR-44's task-pause-and-resume requirement apply to bystanders who voluntarily
-    join a conversation?
-
 → ISSUE: The post-conversation flow description says `social_joy_delta = score − 5`
 applied as a delta, with the delta "clamped to [0, 100]." BHVR-66 specifies clipping
 the *result* (social_joy + delta) into [0, 100], not the delta itself. These differ:
@@ -465,8 +429,8 @@ for `social_joy = 3, score = 0`, clipping the delta yields `social_joy = 3`; cli
 the result yields `social_joy = 0`. The spec is correct; the doc's phrasing is wrong.
 
 → ISSUE: `run_conversation` returns only elapsed game minutes. If the original target
-(or a bystander, depending on FLAG resolution above) has an in-progress base action
-(crafting, cooking) when the conversation begins, their Simulation Engine completion
-event is not paused. Conversation System has no channel to signal Simulation Engine to
-remove and reschedule those events forward by the conversation's duration. The current
-API cannot implement BHVR-44's "pause their task gracefully and resume it."
+or a bystander who voluntarily joins has an in-progress base action (crafting, cooking)
+when the conversation begins, their Simulation Engine completion event is not paused.
+Conversation System has no channel to signal Simulation Engine to remove and reschedule
+those events forward by the conversation's duration. The current API cannot implement
+BHVR-44's "pause their task gracefully and resume it."

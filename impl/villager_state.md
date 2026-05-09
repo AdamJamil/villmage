@@ -87,7 +87,7 @@ enum MoodSubcomponent {
     CONNECTEDNESS    = 2,   // VRBTM-180 descriptions
     CLEANLINESS      = 3,   // VRBTM-183 descriptions
     BASE_CLEANLINESS = 4,   // VRBTM-185 descriptions
-    REST             = 5,   // rest bonus; no dedicated description tier; only selected when r < 5 and has highest PD
+    REST             = 5,   // rest bonus; VRBTM-292 descriptions (3 tiers); only selected when r < 5 and has highest PD
 }
 ```
 
@@ -168,7 +168,10 @@ struct ComputedStats {
 
 **Partial derivative computation (BHVR-174, BHVR-191):** compute numerically via finite differences (ε = 1e-4). For mood, perturb each of {sj, cn, cl, bc} by ε and compute resulting mood change; for `r` (rest hours), the partial derivative magnitude is `0.06` when `r < 5` else `0` (analytical, since the rest term is linear). Select the highest magnitude. For health, perturb each of {w, s, h} by ε and compare. Ties broken by enum declaration order.
 
-**Note on REST subcomponent:** when r ≥ 5 (never rested or rested >5 hours ago), the rest partial derivative is 0 and REST is never selected as dominant. When REST is selected as dominant, surface... the mood description tier (VRBTM-173) only — there is no separate rest subcomponent description. In practice, the prompt simply includes the mood description without an additional subcomponent line.
+**Note on REST subcomponent:** when r ≥ 5 (never rested or rested >5 hours ago), the rest partial derivative is 0 and REST is never selected as dominant. When REST is selected as dominant, surface its dedicated VRBTM-292 description tier:
+- [67-100] You've had time to yourself recently. Your head feels clear.
+- [33-67] It's been a while since you've had a moment to just sit and breathe.
+- [0-33] You've been going nonstop without a break. You're wound tight.
 
 ---
 
@@ -411,7 +414,7 @@ def _compute_health(self) -> float:
 - well_being: VRBTM-170 (5 tiers: 0–10, 10–30, 30–50, 50–85, 85–100)
 - mood: VRBTM-173
 - health: VRBTM-188
-- safety: (no dedicated VRBTM table; use well_being-style tier descriptions — TODO: confirm)
+- safety: VRBTM-291
 - social_joy (MoodSubcomponent.SOCIAL_JOY): VRBTM-178
 - connectedness (MoodSubcomponent.CONNECTEDNESS): VRBTM-180
 - cleanliness (MoodSubcomponent.CLEANLINESS): VRBTM-183
@@ -419,7 +422,7 @@ def _compute_health(self) -> float:
 - wakefulness (HealthSubcomponent.WAKEFULNESS): VRBTM-194
 - satiation (HealthSubcomponent.SATIATION): VRBTM-198
 - hydration (HealthSubcomponent.HYDRATION): VRBTM-200
-- rest (MoodSubcomponent.REST): no dedicated VRBTM table; omit the extra description line when REST is dominant
+- rest (MoodSubcomponent.REST): VRBTM-292 (3 tiers: 0–33, 33–67, 67–100)
 
 ---
 
@@ -600,15 +603,6 @@ Zero `awake_minutes_since_compaction`. Called by Simulation Engine immediately a
 ---
 
 ## Flags and Issues
-
-→ FLAG: The spec includes VRBTM-style tier descriptions for every stat except safety. The `get_stat_descriptions` implementation marks safety descriptions as "TODO: confirm." Without spec-authored text, the implementation must invent tiers — which is a creative/functional vision decision.
-    What should the description tiers for the safety score be?
-
-→ FLAG: BHVR-268 requires always including the description for the highest-partial-derivative mood subcomponent. `MoodSubcomponent.REST` has no dedicated VRBTM description table. The implementation resolves this by omitting the extra description line when REST is dominant — directly violating BHVR-268.
-    When REST is the dominant mood input, what description (if any) should be surfaced in the prompt?
-
-→ FLAG: BHVR-266 says "when a satchel is in a villmager's inventory, their carry capacity is increased by 30kg" with no stacking rule stated. A crafter could accumulate multiple satchels over time. The implementation treats this as a binary check (≥1 satchel → +30 kg), capping the bonus at one satchel regardless of count.
-    Does carrying more than one satchel grant additional capacity, or is the bonus fixed at +30 kg regardless of satchel count?
 
 → ISSUE: `connectedness` is declared as `i32` in the VillagerState struct but drains at `100/48 ≈ 2.083/hr` — a non-integer rate. Every other passive drain is an exact integer per hour; connectedness is the exception. Applying `(100/48) * elapsed_hours` to an integer field truncates on each step and accumulates drift over a game day.
 
