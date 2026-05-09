@@ -434,3 +434,38 @@ when the conversation begins, their Simulation Engine completion event is not pa
 Conversation System has no channel to signal Simulation Engine to remove and reschedule
 those events forward by the conversation's duration. The current API cannot implement
 BHVR-44's "pause their task gracefully and resume it."
+
+→ STYLE: `_resolve_single_turn` will have high cyclomatic complexity. It must: (1) fan
+out parallel LLM calls, (2) collect and process concurrent LEAVEs as a special case
+before priority resolution, (3) apply an 8-level priority ordering, (4) apply a
+two-level tiebreak (recency then enum order), (5) append the winning turn to
+`full_turn_log`, (6) update `last_spoke_turn`, and (7) write the turn to every
+participant's Memory System log. That is too many distinct responsibilities in one
+function. The priority/tiebreak selection and the Memory System write should each be
+extracted into their own helper so the resolver becomes a thin coordinator.
+
+→ STYLE: Early-leaver tracking is a footgun. `participant_ids` is shrunk when a villager
+LEAVEs, but `_apply_post_conversation_updates` must cover early leavers too (social score,
++20 connectedness, relationship impressions). `ConversationSession` has no
+`all_ever_participant_ids` field, so the implementation must either reconstruct leavers by
+scanning `full_turn_log` for LEAVE entries or silently drop them — both are error-prone.
+Add an explicit `all_participant_ids: list[str]` field (append-only, never shrinks) so the
+post-conversation pass has an unambiguous roster.
+
+→ STYLE: `last_spoke_turn` uses the integer sentinel `-1` to mean "has never spoken."
+Every consumer that reads this field must know and check the sentinel. The field should be
+`Optional[int]` (or the map entry simply absent for never-spoke participants) so the type
+system enforces the check rather than convention.
+
+→ STYLE: `ConversationSnapshot` construction is a repeated inline pattern. The slice
+`full_turn_log[join_turn_index[v]:]` appears wherever a per-participant snapshot is built
+— in `_resolve_single_turn`, `_pause_for_joiners`, and `_apply_post_conversation_updates`.
+This should be a method on `ConversationSession` (e.g. `snapshot_for(villager_id)`) so the
+slicing formula is not copy-pasted across functions.
+
+→ STYLE: Turn text formatting is assigned to Conversation System but has no home. The
+doc states "Conversation System is responsible for building `ConversationTurn.text`" but
+places this logic inside the already-complex `_resolve_single_turn`. The format rules
+(different string templates per `ConvActionType`) constitute their own match/switch that
+should live in a standalone pure function (e.g. `format_turn_text(result) -> str`) so it
+can be read and tested in isolation.
