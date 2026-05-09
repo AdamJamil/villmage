@@ -18,13 +18,17 @@ Two subsystems call into it:
 
 `AutobalanceMultipliers` is owned by Simulation Engine and passed into Action System at call time. It is defined here for clarity of the cross-subsystem contract but should ultimately live wherever Simulation Engine's types are authored.
 
+`ActionContext` bundles the five read-only inputs that most eligibility and effect functions need. All functions in `eligibility.py` and `effects.py` accept it rather than individual parameters, keeping signatures stable as cross-subsystem dependencies evolve.
+
+`ActiveSleepSegment` captures the in-progress sleep state at the moment a fire-state change interrupts it. Passed to `adjust_active_sleep` to avoid a four-number bare-primitive call site.
+
 ---
 
 ## Core Objects
 
 ### ExploreResource
 
-The five things a villager can explore for (CONST-104, BHVR-105). Profession gating: only `HUNTER` can explore for `BOAR`; all professions can explore for others (with `4x` mean-time penalty on `PEACHES` for non-`GATHERER` villagers per BHVR-38).
+The five things a villager can explore for (CONST-104, BHVR-105). Profession gating: only `HUNTER` can explore for `BOAR`; only `WOODCUTTER` can explore for `LOGS`; any villager can explore for `PEACHES`, `STICKS`, and `LEAVES` (with a `4x` mean-time penalty on `PEACHES` for non-`GATHERER` villagers per BHVR-38).
 
 ```thrift
 enum ExploreResource {
@@ -105,11 +109,42 @@ The three scaling factors written by Simulation Engine at midnight (BHVR-221) an
 struct AutobalanceMultipliers {
     1: f64 exploration_yield_scale = 1.0,
         // > 1.0 means higher yield (shorter effective mean time between items);
-        // applied as: effective_mean = base_mean * profession_factor / (yield_scale * work_speed)
+        // applied as: effective_mean = base_mean * profession_factor / yield_scale
     2: f64 satiation_restore_scale = 1.0,
-        // multiplier on calories restored per food item consumed (eating and cooking output)
+        // multiplier on calories restored per food item consumed
     3: f64 hydration_restore_scale = 1.0,
         // multiplier on mL restored per liter of water drunk
+}
+```
+
+---
+
+### ActionContext
+
+Read-only snapshot of all cross-subsystem inputs needed to evaluate action eligibility and apply effects for one villager at one moment. Passed to every function in `eligibility.py` and `effects.py`.
+
+```thrift
+struct ActionContext {
+    1: string villager_id,
+    2: CharacterCanon canon,
+    3: VillagerState vs,
+    4: map<string, VillagerState> all_states,   // all living villagers, keyed by id
+    5: WorldState ws,
+    6: AutobalanceMultipliers multipliers,
+}
+```
+
+---
+
+### ActiveSleepSegment
+
+The in-progress sleep state passed to `adjust_active_sleep` when a fire-state change (extinguish or relight) splits a sleeping villager's night into two segments with different wakefulness modifiers (BHVR-161, CONST-155).
+
+```thrift
+struct ActiveSleepSegment {
+    1: i32 total_minutes,     // original planned sleep duration
+    2: i32 elapsed_minutes,   // time already slept under the current modifier
+    3: f64 modifier,          // wakefulness-restore multiplier for the elapsed portion
 }
 ```
 
@@ -157,7 +192,7 @@ struct ActionList {
 
 ### SelectedAction
 
-The LLM's parsed and typed action choice, constructed by AI Coordinator from the raw `{"idx": N, "args": {...}}` response. Passed to Simulation Engine, which hands it to `start_action`. Only one action_type is active at a time; only the args fields relevant to that type are populated.
+The LLM's parsed and typed action choice, constructed by AI Coordinator from the raw `{"idx": N, "args": {...}}` response. Passed to Simulation Engine, which hands it to `start_action`. Only one action_type is active at a time; only the args fields relevant to that type are populated. AI Coordinator validates field population against `action_type` before returning.
 
 ```thrift
 struct SelectedAction {
@@ -196,11 +231,11 @@ struct SelectedAction {
 
 ### `action_system/types.py`
 
-Pure data types for the action system — item and resource enums, action discriminants, autobalance multipliers, and the `ValidAction`/`ActionList`/`SelectedAction` DTOs that flow between Action System, AI Coordinator, and Simulation Engine. No logic; import from here, never the reverse.
+Pure data types for the action system — item and resource enums, action discriminants, autobalance multipliers, the `ActionContext` read-only input bundle, the `ActiveSleepSegment` sleep-state snapshot, and the `ValidAction`/`ActionList`/`SelectedAction` DTOs that flow between Action System, AI Coordinator, and Simulation Engine. No logic; import from here, never the reverse.
 
 ### `action_system/eligibility.py`
 
-Per-action-group eligibility checks that inspect Villager State, World State, and Character Canon to produce `ValidAction` entries for one villager at one moment. Each function covers one logical group (eating, exploration, fire tending, crafting, etc.) and returns a list of `ValidAction` objects with fully-formatted prompt text and selectability flags already set. Called exclusively by `api.py`.
+Per-action-group eligibility checks that inspect Villager State, World State, and Character Canon to produce `ValidAction` entries for one villager at one moment. Each function accepts an `ActionContext` and covers one logical group (eating, exploration, fire tending, crafting, etc.), returning a list of `ValidAction` objects with fully-formatted prompt text and selectability flags already set. Called exclusively by `api.py`.
 
 ### `action_system/timing.py`
 
@@ -208,7 +243,7 @@ Duration computation and exploration yield sampling. Contains: modified duration
 
 ### `action_system/effects.py`
 
-Start-effect and completion-effect implementations for every action type. Start effects apply immediately when an action is chosen (e.g., consuming crafting materials at the start of a satchel job). Completion effects fire when Simulation Engine pops the scheduled event. All mutations are routed through Villager State and World State APIs — this file owns no state of its own.
+Start-effect and completion-effect implementations for every action type. Each action type has its own handler function; `apply_start_effect` and `apply_completion_effect` are thin dispatchers over these handlers. Start effects apply immediately when an action is chosen (e.g., consuming crafting materials at the start of a `CRAFT_NEW` job). Completion effects fire when Simulation Engine pops the scheduled event. All mutations are routed through Villager State and World State APIs — this file owns no state of its own.
 
 ### `action_system/api.py`
 
@@ -230,19 +265,23 @@ Public API surface for the Action System: `get_valid_actions`, `start_action`, `
 
 **`AutobalanceMultipliers`** — The three scaling factors (exploration yield, satiation restoration, hydration restoration) written by Simulation Engine at midnight and read by Action System at call time. Defined here for explicitness of the cross-subsystem contract; the authoritative instance lives in Simulation Engine.
 
+**`ActionContext`** — Read-only snapshot of all cross-subsystem inputs needed to evaluate action eligibility and apply effects: villager id, character canon, villager state, all living villager states, world state, and current autobalance multipliers. Passed to every function in `eligibility.py` and `effects.py` to keep signatures stable.
+
+**`ActiveSleepSegment`** — The in-progress sleep state at the moment a fire-state change splits a sleeping villager's night. Carries `total_minutes`, `elapsed_minutes`, and `modifier` (the wakefulness multiplier active for the elapsed portion). Passed to `adjust_active_sleep`.
+
 **`ValidAction`** — A single entry in the action menu as it will be presented to the LLM. Carries the fully-formatted VRBTM prompt text, the `ActionType` for reverse-mapping, whether the action is selectable, and (when selectable) its 1-based index. Non-selectable entries are rendered without an index.
 
 **`ActionList`** — The complete action menu for one villager at one moment. Two sections rendered separately: `main_actions` (everything except crafter recipes) and `crafter_recipes` (always all three recipes for a CRAFTER, empty otherwise). Indices are globally unique across both sections so the LLM always picks one unambiguous integer.
 
-**`SelectedAction`** — The LLM's parsed and validated action choice, constructed by AI Coordinator from the raw JSON response and passed to Simulation Engine, which hands it to `start_action`. Carries the `ActionType` and only the args fields relevant to that type; all other optional fields are absent.
+**`SelectedAction`** — The LLM's parsed and validated action choice, constructed by AI Coordinator from the raw JSON response and passed to Simulation Engine, which hands it to `start_action`. Carries the `ActionType` and only the args fields relevant to that type; all other optional fields are absent. AI Coordinator validates field population against `action_type` before returning.
 
 ---
 
 ## What This Subsystem Does NOT Own
 
-- **Autobalance multiplier values** — written and stored by Simulation Engine; passed in at call time.
+- **Autobalance multiplier values** — written and stored by Simulation Engine; passed in via `ActionContext`.
 - **Exploration randomness state** — Erlang sampling is stateless (seeded per call); no persistent RNG state is needed.
-- **Conversation execution** — TALK_TO is dispatched by Simulation Engine to Conversation System; Action System only lists it as a valid action.
+- **Conversation execution** — `TALK_TO` is dispatched directly by Simulation Engine to Conversation System; `start_action` returns `0` for `TALK_TO` and `complete_action` is never called for it.
 - **Memory or logs** — start/completion effects are applied silently through Villager State and World State mutations; event logging is the caller's responsibility.
 
 ---
@@ -263,77 +302,72 @@ def exploration_effective_mean(
     profession: Profession,
     yield_scale: float,
 ) -> float:
-    """Mean minutes per item for exploration, incorporating the 4x non-gatherer peach penalty and autobalance yield scale (BHVR-38, CONST-104)."""
+    """Mean minutes per item for exploration, incorporating the 4x non-gatherer peach penalty
+    and autobalance yield scale (BHVR-38, CONST-104). Work-speed is a per-villager factor
+    applied separately in sample_exploration_yield."""
 
 def sample_exploration_yield(
     effective_mean_minutes: float,
+    work_speed: float,
     duration_minutes: int,
     item_weight_kg: float,
     remaining_capacity_kg: float,
 ) -> int:
-    """Items found during exploration. Samples inter-arrival times via Erlang(k=5) until time or carry capacity is exhausted (REQ-99, BHVR-102)."""
+    """Items found during exploration. Scales effective_mean by work_speed, then samples
+    inter-arrival times via Erlang(k=5) until time or carry capacity is exhausted
+    (REQ-99, BHVR-102, BHVR-289)."""
 ```
 
 ---
 
 ### `action_system/eligibility.py`
 
-All functions assume the villager is at base and alive. Each returns `ValidAction` entries for one logical action group.
+All functions assume the villager is at base and alive. Each accepts an `ActionContext` and returns `ValidAction` entries for one logical action group.
 
 ```python
-def eating_and_drinking_actions(vs: VillagerState, ws: WorldState) -> list[ValidAction]:
+def eating_and_drinking_actions(ctx: ActionContext) -> list[ValidAction]:
     """Eat-peach and eat-cooked-meat entries if those items are in inventory; drink-water if base supply > 0 (BHVR-81–83)."""
 
-def storage_actions(vs: VillagerState, ws: WorldState) -> list[ValidAction]:
+def storage_actions(ctx: ActionContext) -> list[ValidAction]:
     """Take-from-base for items in base storage; store-in-base for items in inventory (BHVR-76–77)."""
 
-def resting_spot_actions(vs: VillagerState, ws: WorldState) -> list[ValidAction]:
+def resting_spot_actions(ctx: ActionContext) -> list[ValidAction]:
     """Place-and-claim bed-roll or cot if the villager holds one and has not already placed that spot type (BHVR-92–93)."""
 
-def exploration_actions(
-    vs: VillagerState,
-    profession: Profession,
-    ws: WorldState,
-    multipliers: AutobalanceMultipliers,
-) -> list[ValidAction]:
-    """Explore entries for each unlocked resource. Full-inventory entries are included non-selectable with the 'no inventory space' note; profession-locked resources are excluded entirely (BHVR-100–103)."""
+def exploration_actions(ctx: ActionContext) -> list[ValidAction]:
+    """Explore entries for each resource the villager can access: PEACHES/STICKS/LEAVES for
+    all villagers (PEACHES at 4x mean for non-GATHERER); LOGS for WOODCUTTER only; BOAR for
+    HUNTER only. Full-inventory entries are included non-selectable with the 'no inventory
+    space' note; profession-locked resources are excluded entirely (BHVR-100–103)."""
 
-def rest_action(vs: VillagerState) -> list[ValidAction]:
+def rest_action(ctx: ActionContext) -> list[ValidAction]:
     """Sit-and-relax entry, always available at base (BHVR-109)."""
 
-def fire_tending_actions(vs: VillagerState, ws: WorldState) -> list[ValidAction]:
+def fire_tending_actions(ctx: ActionContext) -> list[ValidAction]:
     """Add-sticks, add-firewood, and light/extinguish entries. Quantities respect the 4-hour fuel cap; fuel remaining is shown inline (BHVR-113–119)."""
 
-def misc_actions(vs: VillagerState, ws: WorldState) -> list[ValidAction]:
+def misc_actions(ctx: ActionContext) -> list[ValidAction]:
     """Scrape-hide, haul-water, butcher-carcass, clean-camp, and split-logs entries when relevant materials or conditions exist (VRBTM-123)."""
 
-def crafting_actions(vs: VillagerState, ws: WorldState) -> list[ValidAction]:
+def crafting_actions(ctx: ActionContext) -> list[ValidAction]:
     """All three crafter recipes (always shown to CRAFTER villagers) plus continue-crafting if a job is in progress. Non-selectable entries include the missing-materials note (BHVR-144–145)."""
 
-def cooking_actions(vs: VillagerState, ws: WorldState) -> list[ValidAction]:
-    """Cook-meat (or finish-cooking when a paused job exists) for COOK profession villagers when raw meat is available. Requires lit fire; shows as non-selectable if fire is out (CONST-147, BHVR-285)."""
+def cooking_actions(ctx: ActionContext) -> list[ValidAction]:
+    """Cook-meat (or finish-cooking when ctx.vs.cooking_paused is set) for COOK profession
+    villagers when raw meat is available. Requires lit fire; shown as non-selectable if fire
+    is out (CONST-147, BHVR-285). cooking_paused is a VillagerState field set by Simulation
+    Engine when fire extinguishes mid-cook and cleared when cooking resumes or is cancelled."""
 
-def sleeping_actions(vs: VillagerState) -> list[ValidAction]:
+def sleeping_actions(ctx: ActionContext) -> list[ValidAction]:
     """Go-to-sleep entry with 4–12 hour range (BHVR-152)."""
 
-def washing_action(vs: VillagerState, ws: WorldState) -> list[ValidAction]:
+def washing_action(ctx: ActionContext) -> list[ValidAction]:
     """Wash-up entry when base water supply >= 500 mL (VRBTM-164, CONST-165)."""
 
-def conversation_actions(
-    villager_id: str,
-    all_states: dict[str, VillagerState],
-    ws: WorldState,
-) -> list[ValidAction]:
+def conversation_actions(ctx: ActionContext) -> list[ValidAction]:
     """Talk-to entries for each other villager who is at base, awake, and not on an away action (BHVR-43, BHVR-284)."""
 
-def build_action_list(
-    villager_id: str,
-    canon: CharacterCanon,
-    vs: VillagerState,
-    all_states: dict[str, VillagerState],
-    ws: WorldState,
-    multipliers: AutobalanceMultipliers,
-) -> ActionList:
+def build_action_list(ctx: ActionContext) -> ActionList:
     """Full action menu for one villager. Calls each action-group builder, assigns sequential 1-based indices to selectable actions, and splits crafter recipes into the separate section."""
 ```
 
@@ -341,21 +375,27 @@ def build_action_list(
 
 ### `action_system/effects.py`
 
+Each action type has its own handler function (e.g., `_start_craft_new`, `_complete_explore`). `apply_start_effect` and `apply_completion_effect` are thin dispatchers over these.
+
 ```python
 def apply_start_effect(
     action: SelectedAction,
-    vs: VillagerState,
-    ws: WorldState,
+    ctx: ActionContext,
 ) -> None:
-    """Immediate pre-action mutations: consumes crafting materials at job start (drawn from inventory then base), and deducts fuel from inventory then base when tending fire (BHVR-115, CONST-141)."""
+    """Immediate pre-action mutations. CRAFT_NEW consumes crafting materials at job start
+    (drawn from inventory then base); CONTINUE_CRAFTING does not consume materials again.
+    Fire-tending actions deduct fuel from inventory then base (BHVR-115, CONST-141)."""
 
 def apply_completion_effect(
     action: SelectedAction,
-    vs: VillagerState,
-    ws: WorldState,
-    multipliers: AutobalanceMultipliers,
+    ctx: ActionContext,
 ) -> None:
-    """End-of-action mutations: adds exploration yield to inventory, restores stats for eating/drinking/sleeping, updates base storage, applies dirtiness from butchering or carcass rot, and marks crafting complete (BHVR-127, BHVR-156, BHVR-282)."""
+    """End-of-action mutations, dispatched per action type. Covers: exploration yield added
+    to inventory; stat restoration for eating/drinking/sleeping (scaled by autobalance
+    multipliers); per-activity calorie charges for exploration (CONST-106, CONST-107) and
+    hauling water (CONST-126); base storage updates; camp dirtiness increments from
+    butchering (CONST-132), eating meat (CONST-133), and cooking meat (CONST-134); crafting
+    completion; and carcass-rot effects (BHVR-282)."""
 ```
 
 ---
@@ -363,71 +403,31 @@ def apply_completion_effect(
 ### `action_system/api.py`
 
 ```python
-def get_valid_actions(
-    villager_id: str,
-    canon: CharacterCanon,
-    vs: VillagerState,
-    all_states: dict[str, VillagerState],
-    ws: WorldState,
-    multipliers: AutobalanceMultipliers,
-) -> ActionList:
+def get_valid_actions(ctx: ActionContext) -> ActionList:
     """Full action menu for one villager. When over-encumbered, returns only store-in-base actions (INVR-208)."""
 
 def start_action(
     action: SelectedAction,
-    vs: VillagerState,
-    ws: WorldState,
+    ctx: ActionContext,
 ) -> int:
-    """Applies start effects and returns the action duration in minutes so Simulation Engine can schedule the completion event."""
+    """Applies start effects and returns the action duration in minutes so Simulation Engine
+    can schedule the completion event. Returns 0 for TALK_TO; Simulation Engine routes that
+    directly to Conversation System without scheduling a completion event."""
 
 def complete_action(
     action: SelectedAction,
-    vs: VillagerState,
-    ws: WorldState,
-    multipliers: AutobalanceMultipliers,
+    ctx: ActionContext,
 ) -> None:
-    """Applies completion effects for a finished action."""
+    """Applies completion effects for a finished action. Never called for TALK_TO."""
 
 def adjust_active_sleep(
     vs: VillagerState,
-    elapsed_minutes: int,
-    old_modifier: float,
-    new_modifier: float,
-    total_sleep_minutes: int,
+    segment: ActiveSleepSegment,
 ) -> int:
-    """Splits an in-progress sleep on fire-state change. Applies wakefulness gain for elapsed_minutes at old_modifier, then returns the remaining duration in minutes for a new segment at new_modifier (BHVR-161)."""
+    """Splits an in-progress sleep on any fire-state change (extinguish or relight). Applies
+    wakefulness gain for segment.elapsed_minutes at segment.modifier, then returns the
+    remaining duration (total_minutes − elapsed_minutes) so Simulation Engine can schedule
+    a new sleep segment under the updated modifier (BHVR-161, CONST-155). Simulation Engine
+    calls this for every sleeping villager whenever LIGHT_FIRE completes or fire extinction
+    fires."""
 ```
-
----
-
-## Flags and Issues
-
-→ ISSUE: The `ExploreResource` overview paragraph states "all professions can explore for others (with `4x` mean-time penalty on `PEACHES` for non-`GATHERER` villagers)," but `LOGS` is WOODCUTTER-locked per ATTR-37 and correctly documented as such in the enum comment. The overview claim is false for `LOGS` and is contradicted by the enum comment directly below it.
-
-→ ISSUE: `FINISH_COOKING` exists in `ActionType` and `cooking_actions` references "a paused job exists" as its display condition, but neither Villager State nor World State defines any field to track a paused or in-progress cooking job. `crafting_in_progress` covers crafting only. There is no analogous `cooking_in_progress` (or equivalent) field defined in any subsystem's owned state.
-
-→ ISSUE: `adjust_active_sleep` accepts a `new_modifier` parameter, but the docstring only describes applying wakefulness at `old_modifier` and returning remaining duration. The remaining duration is `total_sleep_minutes − elapsed_minutes` regardless of `new_modifier`. The purpose of passing `new_modifier` into this function is not documented.
-
-→ ISSUE: The Simulation Engine section in subsystem.md and design.md only documents fire *extinction* as the trigger for `adjust_active_sleep`. However, BHVR-161 requires sleep to be split on any modifier change, and CONST-155 ties the modifier to fire state — meaning relighting the fire mid-sleep also changes the modifier and must also trigger `adjust_active_sleep` for all sleeping villagers. The `LIGHT_FIRE` completion path is not addressed.
-
-→ ISSUE: The `AutobalanceMultipliers` comment documents the application formula as `effective_mean = base_mean * profession_factor / (yield_scale * work_speed)`, but `exploration_effective_mean` accepts no `work_speed` argument and `sample_exploration_yield` accepts no `work_speed` argument. If work speed affects exploration yield, it is absent from every function that computes it; if it does not, the comment formula is wrong.
-
-→ ISSUE: `apply_completion_effect` is documented as handling "exploration yield, stat restoration, base storage updates, dirtiness from butchering or carcass rot, and crafting completion." It does not address the per-activity calorie costs for exploration (CONST-106: 50 cal/hr; CONST-107: 100 cal/hr) or the fixed calorie cost for hauling water (CONST-126: 200 cal). These are distinct one-time charges beyond passive satiation decay and have no documented application site.
-
-→ ISSUE: `apply_completion_effect` is documented as applying "dirtiness from butchering or carcass rot," but CONST-133 (+5 dirtiness per cooked meat eaten) and CONST-134 (+3 dirtiness per cooked meat cooked) also produce camp dirtiness. Neither eating nor cooking completion handlers are noted as responsible for these increments.
-
-→ ISSUE: `apply_start_effect` is documented as "consumes crafting materials at job start (drawn from inventory then base)." This applies only to `CRAFT_NEW`; `CONTINUE_CRAFTING` resumes an existing job and must not consume materials again. The docstring does not make this distinction, creating a latent correctness requirement with no guard.
-
-→ ISSUE: `TALK_TO` appears in `ActionType` and is returned by `get_valid_actions`, but `start_action` (which returns a duration for scheduling) and `complete_action` have no documented behaviour for it. The note that "Action System only lists it as a valid action" does not resolve whether Simulation Engine special-cases `TALK_TO` before calling `start_action`, or whether `start_action` is called and returns 0 as a no-op.
-
-→ STYLE: `apply_start_effect` and `apply_completion_effect` each dispatch over all 25 `ActionType` values in a single function. Both will be hundreds of lines with extreme cyclomatic complexity. Each action type should own its start/completion logic (e.g., a per-type handler function or dataclass), with these two functions reduced to thin dispatchers.
-
-→ STYLE: `SelectedAction` is an untagged union — 10 optional fields where only the subset relevant to the active `action_type` is populated. Callers must know which fields are valid for each type with no type-level enforcement. A proper sum type (one dataclass per action, wrapped in a union) would eliminate this class of error entirely.
-
-→ STYLE: `ValidAction.idx` is `optional i32` with the invariant "present only when `selectable=true`" enforced solely by comment. A non-selectable `ValidAction` with an accidentally assigned `idx`, or a selectable one with a missing `idx`, would be silently wrong. Splitting into `SelectableAction` / `IneligibleAction` subtypes (or a `@dataclass` with a required `idx` on the selectable variant) makes the invariant structural.
-
-→ STYLE: `adjust_active_sleep` takes four bare numeric primitives (`elapsed_minutes`, `old_modifier`, `new_modifier`, `total_sleep_minutes`). Argument-order mistakes are undetectable. A small `ActiveSleepSegment(total_minutes, elapsed_minutes, modifier)` struct would give these values names at the call site.
-
-→ STYLE: Every eligibility function and both effect functions receive `(vs: VillagerState, ws: WorldState)` and, in several cases, `multipliers`, `canon`, and `all_states` on top. This five-argument context cluster is already growing; any new cross-subsystem dependency forces every function signature to change. A `SimContext` (or `ActionContext`) value object grouping these read-only inputs would stabilize all signatures at once.
-
-→ STYLE: `ValidAction.prompt_text` is fully pre-formatted at eligibility-check time, embedding quantity ranges, constraint notes, and display strings as a raw `str`. AI Coordinator cannot reformat, translate, or inspect the constraints — it gets opaque text. Separating the semantic data (item, min_quantity, max_quantity, time_minutes, notes) from the rendered string would let the coordinator build the prompt however it needs to.
