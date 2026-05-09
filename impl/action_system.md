@@ -419,3 +419,15 @@ def adjust_active_sleep(
 → ISSUE: `apply_start_effect` is documented as "consumes crafting materials at job start (drawn from inventory then base)." This applies only to `CRAFT_NEW`; `CONTINUE_CRAFTING` resumes an existing job and must not consume materials again. The docstring does not make this distinction, creating a latent correctness requirement with no guard.
 
 → ISSUE: `TALK_TO` appears in `ActionType` and is returned by `get_valid_actions`, but `start_action` (which returns a duration for scheduling) and `complete_action` have no documented behaviour for it. The note that "Action System only lists it as a valid action" does not resolve whether Simulation Engine special-cases `TALK_TO` before calling `start_action`, or whether `start_action` is called and returns 0 as a no-op.
+
+→ STYLE: `apply_start_effect` and `apply_completion_effect` each dispatch over all 25 `ActionType` values in a single function. Both will be hundreds of lines with extreme cyclomatic complexity. Each action type should own its start/completion logic (e.g., a per-type handler function or dataclass), with these two functions reduced to thin dispatchers.
+
+→ STYLE: `SelectedAction` is an untagged union — 10 optional fields where only the subset relevant to the active `action_type` is populated. Callers must know which fields are valid for each type with no type-level enforcement. A proper sum type (one dataclass per action, wrapped in a union) would eliminate this class of error entirely.
+
+→ STYLE: `ValidAction.idx` is `optional i32` with the invariant "present only when `selectable=true`" enforced solely by comment. A non-selectable `ValidAction` with an accidentally assigned `idx`, or a selectable one with a missing `idx`, would be silently wrong. Splitting into `SelectableAction` / `IneligibleAction` subtypes (or a `@dataclass` with a required `idx` on the selectable variant) makes the invariant structural.
+
+→ STYLE: `adjust_active_sleep` takes four bare numeric primitives (`elapsed_minutes`, `old_modifier`, `new_modifier`, `total_sleep_minutes`). Argument-order mistakes are undetectable. A small `ActiveSleepSegment(total_minutes, elapsed_minutes, modifier)` struct would give these values names at the call site.
+
+→ STYLE: Every eligibility function and both effect functions receive `(vs: VillagerState, ws: WorldState)` and, in several cases, `multipliers`, `canon`, and `all_states` on top. This five-argument context cluster is already growing; any new cross-subsystem dependency forces every function signature to change. A `SimContext` (or `ActionContext`) value object grouping these read-only inputs would stabilize all signatures at once.
+
+→ STYLE: `ValidAction.prompt_text` is fully pre-formatted at eligibility-check time, embedding quantity ranges, constraint notes, and display strings as a raw `str`. AI Coordinator cannot reformat, translate, or inspect the constraints — it gets opaque text. Separating the semantic data (item, min_quantity, max_quantity, time_minutes, notes) from the rendered string would let the coordinator build the prompt however it needs to.
