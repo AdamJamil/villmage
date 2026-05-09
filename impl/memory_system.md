@@ -151,6 +151,26 @@ struct VillagerMemoryContext {
 
 ---
 
+### MemorySnapshot
+
+Typed snapshot of all in-memory Memory System state, returned by `trigger_snapshot` and
+accepted by `from_snapshot`. Provides schema guarantees at the only subsystem restart
+boundary. Simulation Engine collects snapshots from all subsystems and writes the combined
+checkpoint to disk.
+
+```thrift
+struct MemorySnapshot {
+    1: map<string, list<EventLogEntry>> active_context_log,        // per-villager
+    2: map<string, list<MemoryEntry>> short_term_memories,         // per-villager
+    3: map<string, list<MemoryEntry>> medium_term_memories,        // per-villager
+    4: map<string, list<MemoryEntry>> long_term_memories,          // per-villager
+    5: map<string, map<string, RelationshipRecord>> relationships,  // [speaker_id][subject_id]
+    6: i32 last_long_term_compaction_day,
+}
+```
+
+---
+
 ## Key Logic Notes
 
 ### Compaction Triggers
@@ -159,10 +179,11 @@ struct VillagerMemoryContext {
 1. Villager goes to sleep → trigger immediately, unless `active_context_log` is empty (in which case skip; compaction fires at the next normal trigger instead)
 2. Villager completes any action AND `awake_minutes_since_compaction >= 240` → trigger
 
-Both checks are driven by Simulation Engine. After triggering, Simulation Engine calls
-`VillagerState.reset_compaction_counter()`. Memory System submits the `active_context_log`
-to LLM Client as a compaction prompt, stores the resulting `MemoryEntry` in
-`short_term_memories`, and clears `active_context_log`.
+Both checks are driven by Simulation Engine. Villager State owns the `awake_minutes_since_compaction`
+counter and exposes `reset_compaction_counter()`. After triggering compaction, Simulation Engine calls
+`reset_compaction_counter()` on the relevant villager. Memory System submits the `active_context_log`
+to LLM Client as a compaction prompt, stores the resulting `MemoryEntry` in `short_term_memories`, and
+clears `active_context_log`.
 
 **Medium-term (BHVR-255, BHVR-256):**
 At midnight (each time `game_time % 1440 == 0`), Simulation Engine triggers midnight
@@ -201,49 +222,50 @@ each `append_event` call. The `active_context_log` is in-memory only; its disk c
 preserved as part of the event_log.
 
 Checkpoints (BHVR-271, REQ-272): when Simulation Engine calls `trigger_snapshot`, Memory
-System serializes its complete in-memory state — `short_term_memories`,
-`medium_term_memories`, `long_term_memories`, `active_context_log`, `relationships`, and
-`last_long_term_compaction_day` — to a single `.json` checkpoint file. Checkpoint format
-is the same for all subsystems; Simulation Engine coordinates the combined write.
+System returns a `MemorySnapshot` containing its complete in-memory state. Simulation
+Engine collects snapshots from all subsystems and writes the combined checkpoint to disk.
 
 ---
 
 ## API Surface
 
 ```python
-def append_event(self, villager_id: str, entry: EventLogEntry) -> None:
+def append_event(self, villager_id: VillagerId, entry: EventLogEntry) -> None:
     """Append one event to the villager's active_context_log and full event_log.
     Flushes the entry to disk immediately."""
 
-def append_thought(self, villager_id: str, game_time: int, text: str) -> None:
+def append_thought(self, villager_id: VillagerId, game_time: int, text: str) -> None:
     """Append a villager's thought as an EventLogEntry with type=THOUGHT.
     Wraps append_event; exists as a named API to make the call site in Simulation Engine
     unambiguous."""
 
 def write_impressions(
     self,
-    speaker_id: str,
-    subject_id: str,
+    speaker_id: VillagerId,
+    subject_id: VillagerId,
     impression: str,
     desc_update: str | None,
 ) -> None:
-    """Append impression to the speaker's recent-impression queue for subject (FIFO, cap 3).
-    If desc_update is provided, replace the relationship description wholesale."""
+    """Append impression to the speaker's recent-impression queue for subject (FIFO, cap 3);
+    oldest impression is dropped when the queue is full. If desc_update is provided, replace
+    the relationship description wholesale."""
 
 async def trigger_short_term_compaction(
-    self, villager_id: str, reason: CompactionReason
+    self, villager_id: VillagerId, game_time: int, reason: CompactionReason
 ) -> None:
     """Submit active_context_log to LLM for compaction; store result in short_term_memories;
     clear active_context_log. Called by Simulation Engine on sleep or 4h-awake threshold."""
 
-async def trigger_midnight_compaction(self) -> None:
-    """For each villager: compact previous-day short-term memories into one medium-term entry.
-    Also runs long-term compaction if today is day 3, 6, 9, etc."""
+async def trigger_midnight_compaction(self, current_game_time: int) -> None:
+    """Orchestrate midnight compaction for all villagers. Calls _compact_medium_term for each
+    villager (which forces short-term compaction first if needed), then calls _compact_long_term
+    if the current day is a multiple of 3."""
 
-def trigger_snapshot(self) -> dict[str, object]:
-    """Return fully serializable snapshot of all in-memory memory state for checkpointing."""
+def trigger_snapshot(self) -> MemorySnapshot:
+    """Return a fully serializable MemorySnapshot of all in-memory state for checkpointing.
+    Simulation Engine is responsible for writing it to disk."""
 
-def get_memory_context(self, villager_id: str) -> VillagerMemoryContext:
+def get_memory_context(self, villager_id: VillagerId) -> VillagerMemoryContext:
     """Assemble and return all memory tiers, active log, and relationships for the villager.
     Called by AI Coordinator immediately before prompt assembly."""
 ```
@@ -254,11 +276,16 @@ def get_memory_context(self, villager_id: str) -> VillagerMemoryContext:
 
 ```
 memory_system/
-    types.py        — EventType, EventLogEntry, MemoryEntry, RelationshipRecord,
-                      CompactionReason, VillagerMemoryContext. No logic; no LLM dependency.
+    types.py        — VillagerId (newtype), EventType, EventLogEntry, MemoryEntry,
+                      RelationshipRecord, CompactionReason, VillagerMemoryContext,
+                      MemorySnapshot. No logic; no LLM dependency.
 
     memory.py       — MemorySystem class: all state and logic. Owns the in-memory data
-                      structures and the async compaction paths. Imports LLMClient.
+                      structures and the async compaction paths. Exposes synchronous mutators
+                      (append_event, append_thought, write_impressions, trigger_snapshot,
+                      get_memory_context) and async compaction APIs
+                      (trigger_short_term_compaction, trigger_midnight_compaction). The
+                      only file in this package that imports LLMClient.
 ```
 
 No `__init__.py` re-export layer. Callers import directly from `memory_system.types` or
@@ -300,6 +327,12 @@ only file in this package that imports LLMClient.
 ### Object Assignments and Docstrings
 
 #### `memory_system/types.py`
+
+**`VillagerId`** *(newtype)*
+```
+Newtype wrapper around str for villager identifiers. Prevents silently mixing up
+villager_id, speaker_id, and subject_id at call sites where all three are in scope.
+```
 
 **`EventType`** *(enum)*
 ```
@@ -351,6 +384,14 @@ the action-selection prompt (static-to-dynamic: long-term → medium-term →
 short-term → active log; relationships alongside character bios).
 ```
 
+**`MemorySnapshot`** *(dataclass)*
+```
+Typed snapshot of all in-memory Memory System state returned by trigger_snapshot
+and accepted by from_snapshot. Provides schema guarantees at the only subsystem
+restart boundary. Simulation Engine writes it to disk; the shape mirrors the
+MemorySystem's in-memory layout exactly.
+```
+
 #### `memory_system/memory.py`
 
 **`MemorySystem`** *(class)*
@@ -375,32 +416,32 @@ Pure data declarations (enums and dataclasses). No core functions.
 ### `memory_system/memory.py` — `MemorySystem`
 
 ```python
-def __init__(self, villager_ids: list[str], event_log_path: Path) -> None:
+def __init__(self, villager_ids: list[VillagerId], event_log_path: Path) -> None:
     """Initialize per-villager in-memory structures and open the event log file for appending.
     Sets default relationship descriptions for all 30 ordered pairs."""
 ```
 
 ```python
 @classmethod
-def from_snapshot(cls, snapshot: dict[str, object], event_log_path: Path) -> MemorySystem:
-    """Reconstruct a MemorySystem from a checkpoint dict produced by trigger_snapshot."""
+def from_snapshot(cls, snapshot: MemorySnapshot, event_log_path: Path) -> MemorySystem:
+    """Reconstruct a MemorySystem from a MemorySnapshot produced by trigger_snapshot."""
 ```
 
 ```python
-def append_event(self, villager_id: str, entry: EventLogEntry) -> None:
+def append_event(self, villager_id: VillagerId, entry: EventLogEntry) -> None:
     """Add entry to the villager's active_context_log and flush it to the JSONL event log on disk."""
 ```
 
 ```python
-def append_thought(self, villager_id: str, game_time: int, text: str) -> None:
+def append_thought(self, villager_id: VillagerId, game_time: int, text: str) -> None:
     """Wrap text as a THOUGHT-typed EventLogEntry and delegate to append_event."""
 ```
 
 ```python
 def write_impressions(
     self,
-    speaker_id: str,
-    subject_id: str,
+    speaker_id: VillagerId,
+    subject_id: VillagerId,
     impression: str,
     desc_update: str | None,
 ) -> None:
@@ -410,7 +451,7 @@ def write_impressions(
 
 ```python
 async def trigger_short_term_compaction(
-    self, villager_id: str, game_time: int, reason: CompactionReason
+    self, villager_id: VillagerId, game_time: int, reason: CompactionReason
 ) -> None:
     """Submit active_context_log to LLM, store the resulting MemoryEntry in short_term_memories,
     and clear active_context_log. game_time is recorded on the produced MemoryEntry."""
@@ -418,41 +459,31 @@ async def trigger_short_term_compaction(
 
 ```python
 async def trigger_midnight_compaction(self, current_game_time: int) -> None:
-    """For each villager: compact previous-day short-term memories into one medium-term MemoryEntry,
-    removing the source entries. Also runs long-term compaction if current day is a multiple of 3.
-    current_game_time determines which entries are "previous day" and whether long-term fires."""
+    """Orchestrate midnight compaction for all villagers. Calls _compact_medium_term for each
+    villager, then calls _compact_long_term if current day is a multiple of 3."""
 ```
 
 ```python
-def trigger_snapshot(self) -> dict[str, object]:
-    """Return a fully JSON-serializable dict of all in-memory state for checkpointing.
-    Includes all memory tiers, active_context_log, relationships, and last_long_term_compaction_day."""
+async def _compact_medium_term(self, villager_id: VillagerId, current_game_time: int) -> None:
+    """Compact previous-day short-term memories into one medium-term MemoryEntry for this villager.
+    Forces short-term compaction first if the villager has uncompacted events. No-op if no
+    previous-day short-term memories exist after that step."""
 ```
 
 ```python
-def get_memory_context(self, villager_id: str) -> VillagerMemoryContext:
+async def _compact_long_term(self, current_game_time: int) -> None:
+    """Compact all medium-term memories since the last long-term compaction into one long-term
+    MemoryEntry per villager. Updates last_long_term_compaction_day."""
+```
+
+```python
+def trigger_snapshot(self) -> MemorySnapshot:
+    """Return a fully serializable MemorySnapshot of all in-memory state for checkpointing.
+    Simulation Engine is responsible for writing it to disk."""
+```
+
+```python
+def get_memory_context(self, villager_id: VillagerId) -> VillagerMemoryContext:
     """Assemble and return all memory tiers, active log, and relationships for prompt construction.
     Called by AI Coordinator immediately before rendering the action-selection prompt."""
 ```
-
----
-
-## Flags and Issues
-
-→ ISSUE: `trigger_short_term_compaction` and `trigger_midnight_compaction` have conflicting signatures between the two sections of this document. In "Step 1 — Core Functions," `trigger_short_term_compaction` includes `game_time: int` and `trigger_midnight_compaction` includes `current_game_time: int`; both parameters are absent from the "API Surface" section.
-
-→ ISSUE: The "Key Logic Notes — Compaction Triggers" section states that after short-term compaction fires, Simulation Engine calls `VillagerState.reset_compaction_counter()`, and internally relies on an `awake_minutes_since_compaction` counter. Neither this method nor this field appears anywhere in the Villager State design or subsystem documentation. The ownership and API for this counter are undefined across subsystem boundaries.
-
-→ ISSUE: The "Persistence and Snapshots" section states Memory System serializes state "to a single `.json` checkpoint file," implying it writes to disk directly. The `trigger_snapshot` API surface returns `dict[str, object]`, and the same paragraph states "Simulation Engine coordinates the combined write." All three statements cannot simultaneously be true.
-
-→ STYLE: `trigger_midnight_compaction` has high cyclomatic complexity: it must iterate all villagers, conditionally force short-term compaction for each, run medium-term compaction per-villager, and conditionally invoke long-term compaction — all in one function body. The cascading trigger chain (long-term forces medium, medium forces short) is order-dependent and should be split into discrete named steps rather than one monolith.
-
-→ STYLE: `MemorySystem` is a god object: it owns disk I/O (event log flushing), three in-memory memory tiers, relationship records, async LLM fan-outs for compaction, snapshot serialization, and prompt context assembly. That is five distinct responsibilities. At minimum, relationship record management and compaction orchestration are strong candidates for extraction into helper objects.
-
-→ STYLE: `trigger_snapshot` returns `dict[str, object]` and `from_snapshot` accepts the same. In strict Pyre, `object` is essentially `Any` — the return type carries no schema, defeating type safety at the only subsystem restart boundary. A typed `MemorySnapshot` dataclass (parallel to `VillagerMemoryContext`) should be used instead.
-
-→ STYLE: `villager_id: str` is threaded through every public method. A dedicated `VillagerId` newtype (or `Literal`-constrained alias) would catch caller-site mixups (e.g., passing a subject id where a speaker id is expected) at the type level rather than silently producing wrong results at runtime.
-
-→ STYLE: `EventLogEntry.text` carries an implicit contract — it must be self-contained because it is fed verbatim into LLM prompts with no surrounding context. Nothing in the type enforces this; wrong text silently produces bad compaction summaries. A named constructor (e.g., `EventLogEntry.for_prompt(text)`) or a validated wrapper type would make the obligation explicit at the call site.
-
-→ STYLE: `write_impressions` silently drops the oldest impression when the queue reaches capacity. Callers who are not aware of the FIFO-drop behavior (e.g., expecting all impressions to accumulate) will get wrong results with no error. The drop behavior should be documented at the call site, or the method should return the dropped impression so callers can observe it.
