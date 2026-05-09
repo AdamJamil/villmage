@@ -5,7 +5,7 @@
 Character Canon is a static, immutable data store. It is authored once at startup and never mutated during simulation. It is a leaf subsystem: no runtime dependencies, no calls to other subsystems.
 
 Two subsystems read from it:
-- **Action System** — reads `profession` to gate exploration types, crafting recipes, and cooking actions.
+- **Action System** — reads `profession` to gate crafting recipes and cooking actions, and to determine whether the 4× peach-exploration time penalty applies.
 - **AI Coordinator** — reads `backstory`, `bio`, `personality`, `desires`, and `profession` for prompt assembly.
 
 ---
@@ -14,7 +14,7 @@ Two subsystems read from it:
 
 ### Profession
 
-An enum covering exactly six values per ATTR-37 / design.md resolutions. `BUILDER` has no mechanical effect. `GATHERER` exists as a formal tag waiving the 4× peach-exploration penalty for Maren.
+An enum covering exactly six values per ATTR-37 / design.md resolutions. `BUILDER` has no mechanical effect. `GATHERER` exists as a formal tag waiving the 4× peach-exploration time penalty for Maren; all villagers can explore for peaches, but non-gatherers take four times as long.
 
 ```thrift
 enum Profession {
@@ -29,17 +29,27 @@ enum Profession {
 
 ---
 
+### VillagerId
+
+A `NewType` wrapping `str`, defined in `types.py`. Used as the stable foreign key for a villager across all subsystems. Pyre enforces that callers cannot accidentally pass an item name or other arbitrary string where a villager id is expected.
+
+```python
+VillagerId = NewType('VillagerId', str)
+```
+
+---
+
 ### VillagerCanon
 
 The complete static identity record for one villager. All fields are set at authoring time and are read-only thereafter.
 
 ```thrift
 struct VillagerCanon {
-    1: string id,           // stable lowercase key, e.g. "aldric" — used as foreign key everywhere
-    2: string name,         // display name, e.g. "Aldric the Woodsman"
-    3: string bio,          // one short paragraph, injected into other-character sections of prompts
-    4: string personality,  // one short paragraph, injected into the villager's own character prompt
-    5: string desires,      // one short paragraph, injected into the villager's own character prompt
+    1: VillagerId id,    // stable lowercase key, e.g. "aldric" — used as foreign key everywhere
+    2: string name,      // display name, e.g. "Aldric the Woodsman"
+    3: string bio,       // one short paragraph, injected into other-character sections of prompts
+    4: string personality, // one short paragraph, injected into the villager's own character prompt
+    5: string desires,   // one short paragraph, injected into the villager's own character prompt
     6: Profession profession,
 }
 ```
@@ -80,18 +90,11 @@ struct CharacterCanon {
 
 All access is read-only. No setters exist.
 
-- `get_villager(id: string) -> VillagerCanon` — O(1) lookup by stable id.
-- `get_all_villagers() -> list<VillagerCanon>` — returns all six in authoring order.
+- `get_villager(id: VillagerId) -> VillagerCanon` — O(1) lookup by stable id.
+- `get_all_villagers() -> tuple[VillagerCanon, ...]` — returns all six in authoring order.
 - `get_backstory() -> WorldBackstory` — returns the global backstory.
-- `get_profession(id: string) -> Profession` — convenience accessor used by Action System.
 
-The internal implementation is a dict keyed by `id` built at construction time.
-
-→ STYLE: `villager_id` is a bare `str` across all four methods; callers have no type-system guarantee they are not passing an item name or any other string — a `VillagerId = NewType('VillagerId', str)` in `types.py` would make cross-type confusion a pyre error.
-
-→ STYLE: `get_profession` is a thin alias for `get_villager(id).profession`; two call-site paths to the same datum will diverge across the codebase — callers should use `get_villager` directly and `get_profession` should be removed.
-
-→ STYLE: `get_all_villagers()` returns a mutable `list`; `tuple[VillagerCanon, ...]` would communicate that the collection is fixed and prevent accidental mutation at call sites.
+The internal implementation is a dict keyed by `VillagerId` built at construction time. The six `VillagerCanon` records are defined as a module-level `_VILLAGERS: tuple[VillagerCanon, ...]` constant so the authored data is readable without constructing the class.
 
 ---
 
@@ -122,15 +125,16 @@ The six villagers and their professions, exactly as authored in VRBTM-3 through 
 
 ```
 character_canon/
-    types.py   — Immutable data types: the Profession enum and the two record structs
-                 (VillagerCanon, WorldBackstory). No logic, no dependencies. Import
-                 these types anywhere a type annotation is needed without pulling in
-                 the populated data store.
+    types.py   — Immutable data types: VillagerId NewType, the Profession enum, and the
+                 two record structs (VillagerCanon, WorldBackstory). No logic, no
+                 dependencies. Import these types anywhere a type annotation is needed
+                 without pulling in the populated data store.
 
     canon.py   — The CharacterCanon class: the subsystem's only API surface. Contains
                  the hardcoded authored data for all six villagers and the world
-                 backstory, constructs the lookup dict at startup, and exposes the
-                 four read-only accessors called by Action System and AI Coordinator.
+                 backstory as a module-level _VILLAGERS constant, constructs the lookup
+                 dict at startup, and exposes the three read-only accessors called by
+                 Action System and AI Coordinator.
 ```
 
 **No `__init__.py` re-export layer.** Callers import directly from `character_canon.types` or `character_canon.canon`. There is no runtime logic at package level.
@@ -143,10 +147,11 @@ character_canon/
 
 ### `character_canon/types.py`
 
-#### `Profession`
-Six-value enum covering every profession tag in the system. Callers (primarily Action System) use these tags to gate exploration types, crafting recipes, and cooking actions. `BUILDER` has no mechanical effect — it is a real tag but gates nothing. `GATHERER` is the only tag that grants a waiver (the 4× peach-exploration penalty exemption for Maren).
+#### `VillagerId`
+A `NewType` wrapping `str`. Used as the stable foreign key for a villager across all subsystems. Prevents callers from accidentally passing an item name or other arbitrary string where a villager id is expected.
 
-→ ISSUE: The opening line says callers use profession tags "to gate exploration types, crafting recipes, and cooking actions." This is inaccurate for `GATHERER`: peach exploration is not gated — any non-gatherer can still explore for peaches, just at 4× the time cost. Saying tags "gate" exploration implies locked access, not a speed penalty. The description conflates two distinct mechanics (access gating vs. timing modification) and should distinguish between them.
+#### `Profession`
+Six-value enum covering every profession tag in the system. Action System uses these tags to gate crafting recipes and cooking actions, and to apply the 4× peach-exploration time penalty to non-gatherers. `BUILDER` has no mechanical effect. `GATHERER` waives the timing penalty; it does not gate access (any villager can explore for peaches).
 
 #### `VillagerCanon`
 Frozen dataclass holding the complete static identity of one villager: stable `id` key, display `name`, `bio` (exposed to other villagers' prompts), `personality` and `desires` (exposed only to the villager's own prompt), and `profession` tag. All fields are set at authoring time; nothing in the simulation mutates them.
@@ -158,8 +163,11 @@ Single-field frozen dataclass holding the shared world-context prose. Injected o
 
 ### `character_canon/canon.py`
 
+#### `_VILLAGERS`
+Module-level `tuple[VillagerCanon, ...]` constant holding all six hardcoded villager records in authoring order. Defined at module level so the authored data is independently readable without constructing `CharacterCanon`.
+
 #### `CharacterCanon`
-The subsystem's sole API surface and the container for all authored data. Built once at module load from hardcoded villager records and the world backstory. Internally maintains a `dict[str, VillagerCanon]` keyed by stable `id` for O(1) lookups. Callers receive a single shared instance and call its read-only accessors; nothing modifies the instance after construction.
+The subsystem's sole API surface. Built once at module load from `_VILLAGERS` and the world backstory. Internally maintains a `dict[VillagerId, VillagerCanon]` for O(1) lookups. Callers receive a single shared instance and call its read-only accessors; nothing modifies the instance after construction.
 
 ---
 
@@ -167,7 +175,7 @@ The subsystem's sole API surface and the container for all authored data. Built 
 
 ### `character_canon/types.py`
 
-`types.py` contains only enum and frozen dataclass definitions. No logic functions belong here — all computation lives in `canon.py`.
+`types.py` contains only the `VillagerId` NewType, enum, and frozen dataclass definitions. No logic functions belong here — all computation lives in `canon.py`.
 
 ---
 
@@ -177,21 +185,14 @@ The subsystem's sole API surface and the container for all authored data. Built 
 
 ```python
 def __init__(self) -> None:
-    """Build the id-keyed lookup dict from the six hardcoded villager records and the world backstory."""
+    """Build the id-keyed lookup dict from _VILLAGERS and the world backstory."""
 
-def get_villager(self, villager_id: str) -> VillagerCanon:
+def get_villager(self, villager_id: VillagerId) -> VillagerCanon:
     """Return the canon record for villager_id. Raises KeyError for unknown ids."""
 
-def get_all_villagers(self) -> list[VillagerCanon]:
+def get_all_villagers(self) -> tuple[VillagerCanon, ...]:
     """Return all six villager records in authoring order."""
 
 def get_backstory(self) -> WorldBackstory:
     """Return the shared world backstory."""
-
-def get_profession(self, villager_id: str) -> Profession:
-    """Return the profession tag for villager_id. Convenience accessor for Action System eligibility checks."""
 ```
-
-→ STYLE: six `VillagerCanon` instantiations embedded inside `__init__` make the constructor a large data blob; hoisting them to a module-level `_VILLAGERS: tuple[VillagerCanon, ...]` constant reduces `__init__` to a one-liner and makes the authored data independently readable without constructing the class.
-
-→ STYLE: `CharacterCanon` is described as both the data store (hardcoded records) and the API surface (accessors); they change for different reasons — authored data rarely changes, but the accessor interface might. Keeping authored data as a module constant and accepting it as a constructor argument would decouple them, but only matters if testability is a concern; flag if tests against alternate canon are ever needed.
