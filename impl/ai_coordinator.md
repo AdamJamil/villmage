@@ -706,3 +706,15 @@ def get_relationship_update(
 → ISSUE: `assemble_conversation_turn` includes `memory_context` but no current stat values or inventory. During conversation, a villager deciding whether to offer items, request food, or comment on their own condition has only indirect access through whatever recent events appear in their log — not their actual live state. This creates a gap between what the character would know and what the prompt tells them.
 
 → ISSUE: `assemble_social_score` takes only `own_canon` and `snapshot`, with no access to the villager's prior relationship data for the participants. A villager's satisfaction with a conversation is shaped by their history with those people (e.g., a deeply distrusted participant makes even a neutral exchange feel sour). The existing relationship descriptions and impressions are available in Memory System but are not passed to this prompt.
+
+→ STYLE: Every public method on `AICoordinator` follows the identical assemble → invoke → parse → retry-once → crash sequence. This pattern is repeated six times with no shared helper. A private `_call(assemble_fn, parse_fn, ctx)` would unify the retry/crash/log logic and make each public method a one-liner delegation.
+
+→ STYLE: `game_time: int` is passed as a bare `int` to every public method. A `GameTime` newtype (or even a module-level alias) would prevent silent parameter-order bugs and make call sites self-documenting.
+
+→ STYLE: `villager_id`, `speaker_id`, and `subject_id` are all bare `str`. The ordered pair `(speaker_id, subject_id)` in `get_relationship_update` is easy to swap; swapping is a silent semantic error. A `VillagerId` newtype would make the compiler catch transpositions.
+
+→ STYLE: `assemble_*` functions return an unnamed `tuple[list[PromptSegment], list[int]]`. Callers must remember that index 0 is segments and index 1 is breakpoints. A two-field dataclass (e.g. `PromptPackage`) eliminates positional confusion at every call site with zero extra logic.
+
+→ STYLE: Caller-side pre-filtering is a footgun in two places: (1) `ConversationSnapshot.history` must already be visibility-filtered to the prompted villager's perspective before passing to any `assemble_*` function — AI Coordinator never filters internally; (2) `assemble_join_decision` additionally requires the caller to pre-slice history to the first two entries. Both violations produce silent misbehavior (LLM sees turns it shouldn't). Encoding the slice/filter as a typed wrapper (e.g. `JoinDecisionSnapshot`) would make the constraint impossible to forget.
+
+→ STYLE: `assemble_relationship_update` receives `existing_description: str` and `recent_impressions: list[str]` as separate primitives that the caller must extract from `MemorySystem` and pass correctly for the right ordered pair. This is better expressed as a single `RelationshipRecord` value object so the caller cannot accidentally pass mismatched fields from different villager pairs.
