@@ -2,7 +2,7 @@
 
 ## Overview
 
-LLM Client is a thin, stateless async wrapper around the Gemini Flash 2.5 API. It accepts prompt segments and cache breakpoint hints, handles transient error retries with exponential backoff, and returns raw completion text. It has no domain knowledge — all JSON parsing, validation, and malformed-output retrying happen in callers.
+LLM Client is a thin, stateless async wrapper around the Gemini Flash 2.5 API. It accepts prompt segments and a call type, handles transient error retries with exponential backoff, and returns raw completion text. It has no domain knowledge — all JSON parsing, validation, and malformed-output retrying happen in callers.
 
 Two subsystems call into it:
 - **AI Coordinator** — action selection, conversation turns, join decisions, social scores, relationship updates
@@ -23,6 +23,25 @@ enum MessageRole {
     MODEL  = 3,
 }
 ```
+
+---
+
+### CallType
+
+The purpose of an LLM call, used to select the appropriate temperature (CONST-290). Callers declare intent; the client maps to the right float internally.
+
+```thrift
+enum CallType {
+    ACTION_SELECTION    = 1,   // temperature 0.7
+    CONVERSATION_TURN   = 2,   // temperature 1.0
+    MEMORY_COMPACTION   = 3,   // temperature 0.2
+    RELATIONSHIP_UPDATE = 4,   // temperature 0.4
+}
+```
+
+**Notes:**
+- The temperature mapping is a private constant in `client.py`; `types.py` defines only the enum.
+- Callers never supply a raw float — incorrect temperatures are not possible.
 
 ---
 
@@ -64,34 +83,29 @@ struct LLMResponse {
 
 ### LLMConfig
 
-Construction-time configuration. Fixed for the lifetime of the client instance. Temperature varies by call type (CONST-290): callers pass the appropriate temperature per invocation.
+Construction-time configuration. Fixed for the lifetime of the client instance.
 
 ```thrift
 struct LLMConfig {
-    1: string model = "gemini-2.5-flash",
-    3: i32 max_output_tokens = 2048,
+    1: string model          = "gemini-2.5-flash",
+    2: i32 max_output_tokens = 2048,
+    3: i32 max_retries       = 10,
 }
 ```
-
-**Call-type temperatures (CONST-290):**
-- Action selection: `0.7`
-- Conversation turns: `1.0`
-- Memory compaction: `0.2`
-- Relationship updates: `0.4`
 
 **Notes:**
 - `max_output_tokens = 2048` is sufficient for all call types in this system: action selection JSON is ~100–200 tokens, compaction summaries are ≤256 tokens, conversation turns are short.
 - CONST-261's "2k token budget" refers to the maximum prompt *input* size for memory context, not to `max_output_tokens`.
-- Callers that need short outputs enforce this at the prompt level ("be extremely concise"), not by adjusting `max_output_tokens`.
+- `max_retries = 10` applies only to transient API errors (429, 5xx, network). With exponential backoff starting at 1 s and capping at 60 s, 10 retries allow up to ~5 minutes of retry window before a hard failure.
 
 ---
 
 ## API Surface
 
-- `complete(segments: list[PromptSegment], cache_breakpoint_indices: list[int], temperature: float) -> LLMResponse`
-  — Async Trio coroutine. Assembles the Gemini request at the given temperature, submits it, retries on transient errors, and returns the raw response.
+- `complete(segments: list[PromptSegment], call_type: CallType) -> LLMResponse`
+  — Async Trio coroutine. Assembles the Gemini request at the temperature corresponding to `call_type`, submits it, retries on transient errors up to `max_retries` times, and returns the raw response.
 
-**`cache_breakpoint_indices`:** Indices into `segments` marking the end of static/cacheable prefixes (e.g., `[3]` means segments 0–3 are the static prefix). The design decision is **implicit prefix caching only** — no explicit Gemini `CachedContent` API calls are made. These indices do not change runtime behavior; they document the static/dynamic boundary so callers declare their caching intent and so the ordering contract is machine-checkable. Callers must place static segments before dynamic ones; the client asserts this in debug builds.
+Callers are responsible for ordering segments static-to-dynamic so the longest common prefix is cacheable across calls for the same villager within a session.
 
 ---
 
@@ -101,7 +115,7 @@ struct LLMConfig {
 
 Transient: HTTP 429 (rate limit), HTTP 5xx (server error), network timeouts and resets.
 
-Retry policy: exponential backoff starting at 1 s, doubling each attempt, capped at 60 s, indefinite retries until success or a non-transient error.
+Retry policy: exponential backoff starting at 1 s, doubling each attempt, capped at 60 s, up to `config.max_retries` attempts. After exhausting retries, raises a hard exception.
 
 Non-transient: HTTP 400 (invalid request), HTTP 403 (auth failure). Raised immediately as exceptions with no retry. Callers treat these as hard failures.
 
@@ -109,7 +123,7 @@ The client logs each failed attempt (attempt number, error type, wait duration) 
 
 ### Caching Strategy
 
-Implicit prefix caching only. Gemini Flash 2.5 automatically caches common prompt prefixes across requests within a session. No `CachedContent` objects are created or managed. The client's sole responsibility is to send segments in the order provided; the caller's responsibility is to provide them static-first.
+Implicit prefix caching only. Gemini Flash 2.5 automatically caches common prompt prefixes across requests within a session. No `CachedContent` objects are created or managed. Callers must supply segments static-first; the client sends them in the order provided.
 
 ### Async Concurrency (Trio)
 
@@ -131,13 +145,13 @@ Implicit prefix caching only. Gemini Flash 2.5 automatically caches common promp
 
 ```
 llm_client/
-    types.py   — MessageRole enum, PromptSegment, LLMResponse, LLMConfig.
-                 No logic. Import these types anywhere a type annotation is
-                 needed without pulling in the Gemini SDK dependency.
+    types.py   — MessageRole enum, CallType enum, PromptSegment, LLMResponse,
+                 LLMConfig. No logic. Import these types anywhere a type
+                 annotation is needed without pulling in the Gemini SDK dependency.
 
     client.py  — LLMClient class. The only runtime API surface. Owns the
-                 Gemini SDK client instance, handles Gemini Content assembly,
-                 executes retry logic, and returns LLMResponse.
+                 Gemini SDK client instance, the CallType→temperature mapping,
+                 Gemini Content assembly, retry logic, and response unwrapping.
 ```
 
 No `__init__.py` re-export layer. Callers import directly from `llm_client.types` or `llm_client.client`.
@@ -153,8 +167,11 @@ No `__init__.py` re-export layer. Callers import directly from `llm_client.types
 #### `MessageRole`
 Three-value enum mapping to Gemini's content roles. `SYSTEM` maps to Gemini's `system_instruction` field (extracted before submission by the client); `USER` and `MODEL` map to the `contents` list roles `"user"` and `"model"` respectively.
 
+#### `CallType`
+Four-value enum identifying the purpose of an LLM invocation. Members correspond directly to the four call types in CONST-290. The client maps each member to its temperature internally; callers never supply a raw float.
+
 #### `PromptSegment`
-Frozen dataclass pairing a `MessageRole` with a `text` string. The ordered list of these is the complete input to `complete()`. Callers are responsible for ordering (static first, dynamic last). No validation of ordering at construction time — validation is the client's responsibility.
+Frozen dataclass pairing a `MessageRole` with a `text` string. The ordered list of these is the complete input to `complete()`. Callers are responsible for ordering (static first, dynamic last).
 
 #### `LLMResponse`
 Frozen dataclass carrying the model's raw text output and Gemini usage token counts. `text` is returned verbatim.
@@ -167,9 +184,11 @@ Frozen dataclass holding the three construction-time API parameters. All fields 
 ### `llm_client/client.py`
 
 #### `LLMClient`
-The subsystem's sole API surface. Constructed with an `LLMConfig` and a Gemini API key (passed in by the simulation entry point, which reads it from the environment). Holds one Gemini SDK `GenerativeModel` instance. Exposes one async method, `complete()`.
+The subsystem's sole API surface. Constructed with an `LLMConfig` and a Gemini API key (passed in by the simulation entry point, which reads it from the environment). Holds one Gemini SDK `GenerativeModel` instance and a private `_TEMPERATURES: dict[CallType, float]` mapping. Exposes one async method, `complete()`.
 
-Internally: extracts `SYSTEM` segments and concatenates them as `system_instruction`; maps remaining segments to Gemini `Content` objects preserving order; submits the request; applies the exponential backoff retry loop on transient errors; wraps the response in `LLMResponse`.
+Internally, `complete()` delegates to two private helpers:
+- `_build_contents(segments)` — extracts and concatenates `SYSTEM` segments as `system_instruction`; maps remaining segments to Gemini `Content` objects in order.
+- `_submit_with_retry(request, temperature)` — runs the exponential-backoff retry loop, classifies errors as transient or non-transient, logs each failed attempt, and raises after `max_retries` exhausted.
 
 ---
 
@@ -194,17 +213,38 @@ def __init__(self, config: LLMConfig, api_key: str) -> None:
 async def complete(
     self,
     segments: list[PromptSegment],
-    cache_breakpoint_indices: list[int],
-    temperature: float,
+    call_type: CallType,
 ) -> LLMResponse:
-    """Submit a prompt to Gemini at the given temperature and return the raw completion.
+    """Submit a prompt to Gemini and return the raw completion.
 
-    SYSTEM segments are concatenated and sent as system_instruction.
-    USER/MODEL segments become the contents list in order.
-    Retries 429/5xx/network errors with exponential backoff (1s start,
-    2× each attempt, 60s cap, indefinite). Raises immediately on 400/403.
-    cache_breakpoint_indices is validated in debug builds (static segments
-    must precede dynamic) but does not affect the Gemini request.
+    Temperature is determined by call_type per CONST-290. SYSTEM segments are
+    concatenated and sent as system_instruction. USER/MODEL segments become the
+    contents list in order. Retries 429/5xx/network errors with exponential
+    backoff (1s start, 2× each attempt, 60s cap) up to config.max_retries times,
+    then raises. Raises immediately on 400/403.
+    """
+
+def _build_contents(
+    self,
+    segments: list[PromptSegment],
+) -> tuple[str, list[Content]]:
+    """Extract system instruction and build the Gemini contents list.
+
+    Returns (system_instruction, contents). system_instruction is the
+    concatenation of all SYSTEM segments; contents preserves the order of
+    USER and MODEL segments.
+    """
+
+async def _submit_with_retry(
+    self,
+    request: GenerateContentRequest,
+    temperature: float,
+) -> GenerateContentResponse:
+    """Submit request with exponential-backoff retry on transient errors.
+
+    Transient: 429, 5xx, network errors. Non-transient (400, 403) raise
+    immediately. Raises after config.max_retries failed attempts. Logs each
+    failure with attempt number, error type, and wait duration.
     """
 ```
 
@@ -217,10 +257,10 @@ async def complete(
 ```python
 """Data types for the LLM client subsystem.
 
-Defines MessageRole, PromptSegment, LLMResponse, and LLMConfig — the complete
-set of types needed to call LLMClient.complete(). Import from here whenever you
-need LLM-client type annotations without pulling in the Gemini SDK as a
-dependency.
+Defines MessageRole, CallType, PromptSegment, LLMResponse, and LLMConfig — the
+complete set of types needed to call LLMClient.complete(). Import from here
+whenever you need LLM-client type annotations without pulling in the Gemini SDK
+as a dependency.
 """
 ```
 
@@ -249,6 +289,17 @@ malformed-output retry logic are the caller's responsibility.
 SYSTEM segments are concatenated and passed as system_instruction. USER and
 MODEL segments form the interleaved contents list. The final segment before
 the model responds must be USER.
+"""
+```
+
+### `CallType` (`llm_client/types.py`)
+
+```python
+"""Purpose of an LLM invocation, used to select the correct temperature.
+
+Members correspond to the four call types in CONST-290. The temperature
+mapping lives in client.py; callers declare intent here rather than supplying
+a raw float.
 """
 ```
 
@@ -295,15 +346,3 @@ completion text. Domain concerns — JSON parsing, malformed-output retry, promp
 construction — belong to callers (AI Coordinator, Memory System).
 """
 ```
-
----
-
-→ ISSUE: The `complete()` docstring and API surface section both state that `cache_breakpoint_indices` is "validated in debug builds" to enforce "static segments must precede dynamic." The client receives a list of `PromptSegment` objects whose content it does not interpret — it has no semantic basis for determining which segments are static and which are dynamic. The claimed assertion cannot be implemented as described; the client can at most check that the supplied indices are in-bounds integers.
-
-→ STYLE: `temperature: float` is a footgun. CONST-290 defines exactly four valid temperatures keyed to call type. Every caller must remember the right float; a wrong value (e.g. `0.8`) silently degrades output quality with no error. Replace with a `CallType` enum whose members map to temperatures internally — callers declare intent, the client looks up the float.
-
-→ STYLE: `cache_breakpoint_indices: list[int]` is vestigial noise. The design decision is implicit prefix caching only — these indices have no runtime effect on the Gemini request. Yet every caller must construct and pass the list, and the ISSUE above confirms the promised debug validation cannot be implemented. The parameter should be removed; the ordering contract belongs in a code comment or doc, not a dead parameter.
-
-→ STYLE: `complete()` will accumulate high cyclomatic complexity. It must: filter and concatenate SYSTEM segments, build the USER/MODEL contents list, classify errors as transient vs non-transient, run the exponential-backoff retry loop, unwrap usage metadata, and wrap the result. That is four to five distinct concerns in one function. The retry loop and segment-assembly steps should be extracted as private helpers to keep `complete()` readable.
-
-→ STYLE: Indefinite retry on transient errors is a footgun. "Indefinite retries until success or a non-transient error" means a sustained 429 or server outage hangs the simulation process forever with no escape. A max-attempts cap (or a caller-supplied deadline) is needed so the engine can surface a hard failure rather than stall silently.
