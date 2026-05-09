@@ -87,6 +87,12 @@ All access is read-only. No setters exist.
 
 The internal implementation is a dict keyed by `id` built at construction time.
 
+→ STYLE: `villager_id` is a bare `str` across all four methods; callers have no type-system guarantee they are not passing an item name or any other string — a `VillagerId = NewType('VillagerId', str)` in `types.py` would make cross-type confusion a pyre error.
+
+→ STYLE: `get_profession` is a thin alias for `get_villager(id).profession`; two call-site paths to the same datum will diverge across the codebase — callers should use `get_villager` directly and `get_profession` should be removed.
+
+→ STYLE: `get_all_villagers()` returns a mutable `list`; `tuple[VillagerCanon, ...]` would communicate that the collection is fixed and prevent accidental mutation at call sites.
+
 ---
 
 ## Data Values
@@ -185,3 +191,7 @@ def get_backstory(self) -> WorldBackstory:
 def get_profession(self, villager_id: str) -> Profession:
     """Return the profession tag for villager_id. Convenience accessor for Action System eligibility checks."""
 ```
+
+→ STYLE: six `VillagerCanon` instantiations embedded inside `__init__` make the constructor a large data blob; hoisting them to a module-level `_VILLAGERS: tuple[VillagerCanon, ...]` constant reduces `__init__` to a one-liner and makes the authored data independently readable without constructing the class.
+
+→ STYLE: `CharacterCanon` is described as both the data store (hardcoded records) and the API surface (accessors); they change for different reasons — authored data rarely changes, but the accessor interface might. Keeping authored data as a module constant and accepting it as a constructor argument would decouple them, but only matters if testability is a concern; flag if tests against alternate canon are ever needed.
