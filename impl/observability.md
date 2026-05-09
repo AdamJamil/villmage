@@ -84,8 +84,9 @@ struct FieldChange {
 ### DeltaRecord
 
 One line in `state_deltas.jsonl`. A tagged record; exactly one of the optional payload
-groups is populated depending on `kind`. Written by Simulation Engine after every stat
-decay, action start/completion, and world state mutation.
+groups is populated depending on `kind`. Written by any mutating subsystem via
+`append_delta` — Villager State and World State setters write it directly; Simulation
+Engine writes it for decay and event scheduling.
 
 ```thrift
 struct DeltaRecord {
@@ -96,8 +97,8 @@ struct DeltaRecord {
     3: optional string villager_id,
 
     // VILLAGER_STATS, VILLAGER_INV, WORLD_STATE:
-    // list of (field, old_value, new_value) triples; always non-empty
-    4: list<FieldChange> changes,
+    // list of (field, old_value, new_value) triples; non-empty for all kinds except MEMORY_UPDATE
+    4: optional list<FieldChange> changes,
 
     // MEMORY_UPDATE only:
     5: optional string memory_kind,    // "short_term" | "medium_term" | "long_term"
@@ -336,9 +337,9 @@ reads these formats directly; this module is not imported by viewer code.
 ### `observability/viewer.html`
 
 Standalone single-file HTML/CSS/JS replay viewer. Reads `data/state_deltas.jsonl`,
-`data/checkpoints/`, and `data/events/` from a local path and renders a scrollable
-per-villager event log synchronized with a live state panel. No server required;
-open directly in a browser. Contains all CSS (dark theme) and JS (file loading,
+`data/checkpoints/`, and `data/events/` via `fetch()` relative to the page origin.
+Serve from the project root with any static HTTP server (e.g. `python -m http.server`)
+and open in a browser. Contains all CSS (dark theme) and JS (file loading,
 delta replay, scroll handler, delta highlighting) inline. The JS viewer-state types
 `VillagerViewerState`, `WorldViewerState`, and `ViewerSession` live here as
 in-memory JS objects and are never persisted.
@@ -414,7 +415,7 @@ from files on page load; updated incrementally on scroll.
 
 ```python
 def append_delta(data_dir: Path, record: DeltaRecord) -> None:
-    """Append record as a JSON line to `{data_dir}/state_deltas.jsonl`. Called by Simulation Engine on every state mutation."""
+    """Append record as a JSON line to `{data_dir}/state_deltas.jsonl`. Called by any subsystem that performs a state mutation — Villager State and World State setters call it directly; Simulation Engine calls it for decay and scheduling events."""
 
 def save_checkpoint(data_dir: Path, record: CheckpointRecord) -> None:
     """Write record to `{data_dir}/checkpoints/{record.game_time:05d}.json`. Called by Simulation Engine every 3 in-game hours."""
@@ -441,9 +442,10 @@ async function selectVillager(session: ViewerSession, villagerId: string): Promi
 // State stays at session.current_game_time; no delta replay needed.
 
 function scrollToEvent(session: ViewerSession, eventIndex: number): ViewerSession
-// Advance current_game_time to the game_time of the event at eventIndex. Apply all deltas
-// between the old and new game_time. Return the updated session. changed_fields in
-// villager_states and world_state reflects only deltas at the new game_time (ATTR-16).
+// Move current_game_time to the game_time of the event at eventIndex. When scrolling
+// forward, applies deltas between old and new game_time incrementally. When scrolling
+// backward, calls reconstructStateAt from the nearest preceding checkpoint. Returns the
+// updated session. changed_fields reflects only deltas at exactly the new game_time (ATTR-16).
 ```
 
 #### Standalone — State Reconstruction
@@ -471,30 +473,22 @@ async function loadDeltaIndex(dataDir: string): Promise<Map<number, DeltaRecord[
 
 ---
 
-## Flags and Issues
+## Cross-Subsystem Implementation Decisions
 
-→ ISSUE: The viewer is described as "No server required; open directly in a browser," but `loadAllCheckpoints` and `loadDeltaIndex` must list directories and read arbitrary files from the local filesystem via a `dataDir` path. Modern browsers block `fetch()` and `XMLHttpRequest` for `file://` URLs due to the same-origin policy, making programmatic local file access impossible without either a local HTTP server or a non-browser delivery mechanism (e.g., inlining data or `<input type="file">`). The "no server" constraint directly contradicts the file-loading design.
+Style decisions that emerged from designing the observability layer but apply to the broader codebase.
 
-→ ISSUE: `DeltaRecord.changes` (field 4) is declared without `optional` and its description states "always non-empty," but `MEMORY_UPDATE` records carry no `FieldChange` entries — only `memory_kind`, `content`, and `subject_id` are populated. The struct conflates two incompatible payload shapes: for `MEMORY_UPDATE`, `changes` would have to be an empty list, which contradicts the "always non-empty" invariant. The field should be marked `optional` and the invariant scoped to the three non-memory delta kinds.
+**`get_valid_actions` decomposition.** Implement as a registry of per-action-type `(predicate, formatter)` pairs rather than a monolithic function. Each action type defines its own eligibility predicate and description formatter; `get_valid_actions` iterates over the registry. Keeps cyclomatic complexity flat regardless of how many action types exist.
 
-→ ISSUE: `VillagerViewerState` field numbering jumps from field 16 (`medium_term_memory_texts`) directly to field 18 (`relationship_descriptions`), skipping field 17. The missing field is almost certainly `long_term_memory_texts`, which is tracked in `VillagerMemoryCheckpoint` but is absent from the viewer's display state. Either the field was accidentally dropped or the omission was intentional; in the latter case the checkpoint storing long-term memories is inconsistent with the viewer never surfacing them.
+**Simulation Engine dispatch decomposition.** Each event type handled by a dedicated named function — `_handle_action_completion`, `_handle_fire_extinction`, `_handle_carcass_rot`, `_handle_forced_sleep`, `_handle_death`, `_handle_midnight`, `_handle_checkpoint`. The dispatch loop is a short `match` on event type; all logic lives in the handlers.
 
-→ ISSUE: `scrollToEvent` "applies all deltas between the old and new game_time," which only works when scrolling forward. Backward scrolling — moving to an earlier event — requires replaying from a checkpoint, not un-applying deltas. The function as specified has no branch for `new_game_time < old_game_time` and would produce wrong state on backward scroll. `reconstructStateAt` handles arbitrary target times correctly and should be called instead of incremental delta application whenever the target time is earlier than the current position.
+**`run_conversation` decomposition.** Decompose into `_run_turn_loop`, `_run_bystander_join`, `_run_trade`, and `_score_post_conversation`. `run_conversation` is an orchestrator that calls these in sequence. Each concern is independently readable and testable.
 
-→ ISSUE: `append_delta`'s docstring says "Called by Simulation Engine on every state mutation," but Action System directly mutates both World State (`modify_base_item`, `add_fire_fuel`, `modify_water`, `update_cleanliness_source`) and Villager State (`modify_inventory`, `modify_stat`, `set_crafting_state`) without going through Simulation Engine. Simulation Engine only calls Action System's high-level entry points (`start_action`, `complete_action`); it does not intercept the lower-level setter calls. The docstring attribution is wrong: `append_delta` must be callable by any subsystem that performs a mutation, or the World State and Villager State setters must call it directly.
+**`compute_stats` safety context.** Pass world context as a `WorldContext` dataclass (`base_calories: int`, `base_firewood_minutes: int`, `living_villager_count: int`) rather than three positional primitives. Prevents silent argument transposition.
 
-→ STYLE: `get_valid_actions` will have unmanageable cyclomatic complexity — it must check eligibility, compute quantity bounds, and format descriptions for ~15 action types, each with distinct preconditions (profession, fire state, encumbrance, carry space, location). This function needs to be decomposed into per-action-type predicate+formatter pairs from the outset or it will become unmaintainable.
+**`apply_decay` return type.** Returns `list[ThresholdCrossing]` where `ThresholdCrossing` is a typed dataclass with a `kind: CrossingKind` field (`WAKEFULNESS_ZERO` | `HEALTH_ZERO`). Simulation Engine pattern-matches on `kind`; unhandled crossing kinds are a type error, not a silent no-op.
 
-→ STYLE: Simulation Engine's event dispatch will become a God function — action completions, fire extinction, carcass rot, forced sleep, death, midnight autobalancing, and checkpoint writes all land in one dispatcher. Each handler is substantial logic. Without decomposition into named handler functions, the dispatch loop will be hundreds of lines.
+**AI Coordinator shared prompt prefix.** A `build_static_prefix(villager_id: str) -> list[PromptSegment]` function assembles the shared segment (system prompt, backstory, bios, relationship data). All seven prompt templates call it. Prevents silent divergence when any shared field changes.
 
-→ STYLE: `run_conversation` conflates four distinct concerns: the turn loop, bystander join logic, the trade sub-protocol, and post-conversation social scoring. Each is complex enough to stand alone. Embedding all four in one synchronous function will make it the largest and most tangled function in the codebase.
+**Autobalance multipliers as explicit argument.** `AutobalanceMultipliers` is passed as an explicit argument to `get_valid_actions`, `start_action`, and `complete_action`. Simulation Engine holds the authoritative copy and passes it at each call site. Action System has no implicit dependency on Simulation Engine internals.
 
-→ STYLE: `compute_stats(base_calories, base_firewood, villager_count)` passes safety context as three positional primitives — callers can silently swap argument order and produce wrong safety scores with no type error. A small typed dataclass (e.g., `WorldContext`) would catch transposition at the call site.
-
-→ STYLE: `apply_decay` returns threshold crossings as an untyped list. Callers must correctly interpret crossing semantics (wakefulness→0 means force sleep, health→0 means death) with no structural enforcement. A typed enum or tagged dataclass per crossing kind would make unhandled or mis-routed crossings a type error rather than a silent simulation bug.
-
-→ STYLE: AI Coordinator's seven prompt types all share a static prefix (system prompt, backstory, character bios, relationship data). Without an explicit shared-segment builder, this prefix will be copy-pasted across templates, causing silent divergence when any shared field changes.
-
-→ STYLE: Autobalance multipliers live inside Simulation Engine but are read by Action System at call time as implicit global state. Action System ends up with a hidden dependency on Simulation Engine internals. Passing multipliers as an explicit argument to `get_valid_actions` / `start_action` / `complete_action` would make the dependency visible and testable in isolation.
-
-→ STYLE: Memory System's 4-hour compaction trigger ("complete an action and been awake ≥4 hours since last compaction") requires tracking last-compaction time per villager, but no subsystem is assigned ownership of this state. It will be silently added to whichever subsystem implements the trigger, risking duplication or drift if both Simulation Engine and Memory System independently track it.
+**Memory compaction trigger ownership.** `last_compaction_game_time` is owned by Memory System, stored per villager alongside the rest of the memory state. Memory System exposes `should_compact(villager_id: str, current_game_time: int) -> bool` which encapsulates the 4-hour trigger logic. Simulation Engine calls `should_compact` at action completion; no other subsystem tracks this timestamp.
