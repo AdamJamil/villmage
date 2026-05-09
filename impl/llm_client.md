@@ -299,3 +299,11 @@ construction — belong to callers (AI Coordinator, Memory System).
 ---
 
 → ISSUE: The `complete()` docstring and API surface section both state that `cache_breakpoint_indices` is "validated in debug builds" to enforce "static segments must precede dynamic." The client receives a list of `PromptSegment` objects whose content it does not interpret — it has no semantic basis for determining which segments are static and which are dynamic. The claimed assertion cannot be implemented as described; the client can at most check that the supplied indices are in-bounds integers.
+
+→ STYLE: `temperature: float` is a footgun. CONST-290 defines exactly four valid temperatures keyed to call type. Every caller must remember the right float; a wrong value (e.g. `0.8`) silently degrades output quality with no error. Replace with a `CallType` enum whose members map to temperatures internally — callers declare intent, the client looks up the float.
+
+→ STYLE: `cache_breakpoint_indices: list[int]` is vestigial noise. The design decision is implicit prefix caching only — these indices have no runtime effect on the Gemini request. Yet every caller must construct and pass the list, and the ISSUE above confirms the promised debug validation cannot be implemented. The parameter should be removed; the ordering contract belongs in a code comment or doc, not a dead parameter.
+
+→ STYLE: `complete()` will accumulate high cyclomatic complexity. It must: filter and concatenate SYSTEM segments, build the USER/MODEL contents list, classify errors as transient vs non-transient, run the exponential-backoff retry loop, unwrap usage metadata, and wrap the result. That is four to five distinct concerns in one function. The retry loop and segment-assembly steps should be extracted as private helpers to keep `complete()` readable.
+
+→ STYLE: Indefinite retry on transient errors is a footgun. "Indefinite retries until success or a non-transient error" means a sustained 429 or server outage hangs the simulation process forever with no escape. A max-attempts cap (or a caller-supplied deadline) is needed so the engine can surface a hard failure rather than stall silently.
