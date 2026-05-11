@@ -39,6 +39,13 @@ _MEDIUM_TERM_COMPACTION_PROMPT = (
     "will be thrown out. Prioritize information you will use to inform later "
     "actions or opinions on others. Prioritize information density and accuracy."
 )
+_LONG_TERM_COMPACTION_PROMPT = (
+    "Here are your accumulated memories from prior days: {memories}. "
+    "In 256 tokens (~180 words), form an EXTREMELY CONCISE summary of the salient "
+    "memories you experienced. This will be recorded in the future and the rest "
+    "will be thrown out. Prioritize information you will use to inform later "
+    "actions or opinions on others. Prioritize information density and accuracy."
+)
 
 
 class MemorySystem:
@@ -77,7 +84,7 @@ class MemorySystem:
             }
             for villager_id in villager_ids
         }
-        self._last_long_term_compaction_day = 0
+        self._last_long_term_compaction_day = -1
 
         event_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._event_log_file = event_log_path.open("a", encoding="utf-8")
@@ -115,6 +122,11 @@ class MemorySystem:
         """Return whether one memory entry was compacted during the supplied day."""
 
         return entry.game_time // 1440 == day
+
+    def _is_after_long_term_boundary(self, entry: MemoryEntry) -> bool:
+        """Return whether one medium-term entry is newer than the last long-term cut."""
+
+        return entry.game_time // 1440 > self._last_long_term_compaction_day
 
     def write_impressions(
         self,
@@ -198,10 +210,44 @@ class MemorySystem:
         ]
 
     async def trigger_midnight_compaction(self, current_game_time: int) -> None:
-        """Run the medium-term midnight compaction pass for every villager."""
+        """Run midnight compaction for every villager across all eligible tiers."""
 
         for villager_id in self._active_context_log:
             await self._compact_medium_term(villager_id, current_game_time)
+
+        current_day = current_game_time // 1440
+        if current_day % 3 == 0:
+            await self._compact_long_term(current_game_time)
+
+    async def _compact_long_term(self, current_game_time: int) -> None:
+        """Compact newly accumulated medium-term memories into long-term summaries."""
+
+        for villager_id, medium_term_memories in self._medium_term_memories.items():
+            new_entries = [
+                entry
+                for entry in medium_term_memories
+                if self._is_after_long_term_boundary(entry)
+            ]
+            if len(new_entries) == 0:
+                continue
+
+            prompt = _LONG_TERM_COMPACTION_PROMPT.format(
+                memories=self._serialize_memory_entries(new_entries)
+            )
+            response = await self._llm_client.complete(
+                [PromptSegment(role=MessageRole.USER, text=prompt)],
+                CallType.MEMORY_COMPACTION,
+            )
+            self._long_term_memories[villager_id].append(
+                MemoryEntry(game_time=current_game_time, text=response.text)
+            )
+            self._medium_term_memories[villager_id] = [
+                entry
+                for entry in medium_term_memories
+                if not self._is_after_long_term_boundary(entry)
+            ]
+
+        self._last_long_term_compaction_day = current_game_time // 1440
 
     @staticmethod
     def _copy_memory_map(
