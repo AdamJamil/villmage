@@ -15,8 +15,10 @@ from memory_system.types import (
     EventLogEntry,
     EventType,
     MemoryEntry,
+    MemorySnapshot,
     RelationshipRecord,
     VillagerId,
+    VillagerMemoryContext,
 )
 
 
@@ -95,3 +97,115 @@ class MemorySystem:
             relationship.recent_impressions.pop(0)
         if desc_update is not None:
             relationship.description = desc_update
+
+    @staticmethod
+    def _copy_memory_map(
+        memory_map: dict[VillagerId, list[MemoryEntry]],
+    ) -> dict[VillagerId, list[MemoryEntry]]:
+        """Return a per-villager copy of one memory-tier map."""
+
+        return {
+            villager_id: list(entries) for villager_id, entries in memory_map.items()
+        }
+
+    @staticmethod
+    def _copy_event_log_map(
+        event_log_map: dict[VillagerId, list[EventLogEntry]],
+    ) -> dict[VillagerId, list[EventLogEntry]]:
+        """Return a per-villager copy of one event-log map."""
+
+        return {
+            villager_id: list(entries) for villager_id, entries in event_log_map.items()
+        }
+
+    @staticmethod
+    def _copy_relationship_record(record: RelationshipRecord) -> RelationshipRecord:
+        """Return a deep copy of one relationship record."""
+
+        return RelationshipRecord(
+            description=record.description,
+            recent_impressions=list(record.recent_impressions),
+        )
+
+    @classmethod
+    def _copy_relationship_map(
+        cls,
+        relationship_map: dict[VillagerId, dict[VillagerId, RelationshipRecord]],
+    ) -> dict[VillagerId, dict[VillagerId, RelationshipRecord]]:
+        """Return a deep copy of the full directed relationship map."""
+
+        return {
+            speaker_id: {
+                subject_id: cls._copy_relationship_record(record)
+                for subject_id, record in subject_records.items()
+            }
+            for speaker_id, subject_records in relationship_map.items()
+        }
+
+    def trigger_snapshot(self) -> MemorySnapshot:
+        """Serialize all in-memory state into a stable point-in-time snapshot."""
+
+        return MemorySnapshot(
+            active_context_log=self._copy_event_log_map(self._active_context_log),
+            short_term_memories=self._copy_memory_map(self._short_term_memories),
+            medium_term_memories=self._copy_memory_map(self._medium_term_memories),
+            long_term_memories=self._copy_memory_map(self._long_term_memories),
+            relationships=self._copy_relationship_map(self._relationships),
+            last_long_term_compaction_day=self._last_long_term_compaction_day,
+        )
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: MemorySnapshot,
+        llm_client: LLMClient,
+        event_log_path: Path,
+    ) -> MemorySystem:
+        """Reconstruct a MemorySystem from a previously captured snapshot."""
+
+        if not event_log_path.exists():
+            raise FileNotFoundError(event_log_path)
+
+        villager_ids = list(snapshot.active_context_log.keys())
+        memory_system = cls.__new__(cls)
+        memory_system._llm_client = llm_client
+        memory_system._active_context_log = cls._copy_event_log_map(
+            snapshot.active_context_log
+        )
+        memory_system._short_term_memories = cls._copy_memory_map(
+            snapshot.short_term_memories
+        )
+        memory_system._medium_term_memories = cls._copy_memory_map(
+            snapshot.medium_term_memories
+        )
+        memory_system._long_term_memories = cls._copy_memory_map(
+            snapshot.long_term_memories
+        )
+        memory_system._relationships = cls._copy_relationship_map(
+            snapshot.relationships
+        )
+        memory_system._last_long_term_compaction_day = (
+            snapshot.last_long_term_compaction_day
+        )
+        memory_system._event_log_file = event_log_path.open("a", encoding="utf-8")
+        for villager_id in villager_ids:
+            memory_system._active_context_log.setdefault(villager_id, [])
+            memory_system._short_term_memories.setdefault(villager_id, [])
+            memory_system._medium_term_memories.setdefault(villager_id, [])
+            memory_system._long_term_memories.setdefault(villager_id, [])
+            memory_system._relationships.setdefault(villager_id, {})
+        return memory_system
+
+    def get_memory_context(self, villager_id: VillagerId) -> VillagerMemoryContext:
+        """Assemble the current read-only memory context for one villager."""
+
+        return VillagerMemoryContext(
+            long_term_memories=list(self._long_term_memories[villager_id]),
+            medium_term_memories=list(self._medium_term_memories[villager_id]),
+            short_term_memories=list(self._short_term_memories[villager_id]),
+            active_context_log=list(self._active_context_log[villager_id]),
+            relationships={
+                other_villager_id: self._copy_relationship_record(record)
+                for other_villager_id, record in self._relationships[villager_id].items()
+            },
+        )

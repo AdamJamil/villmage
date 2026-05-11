@@ -10,7 +10,13 @@ from pathlib import Path
 from llm_client.client import LLMClient
 from llm_client.types import LLMConfig
 from memory_system.memory import MemorySystem
-from memory_system.types import EventLogEntry, EventType, RelationshipRecord, VillagerId
+from memory_system.types import (
+    EventLogEntry,
+    EventType,
+    MemoryEntry,
+    RelationshipRecord,
+    VillagerId,
+)
 
 
 _UNKNOWN_RELATIONSHIP_DESCRIPTION = "I don't know anything about them."
@@ -43,6 +49,19 @@ def _relationship_record(
     """Return one directed relationship record from the memory system."""
 
     return memory_system._relationships[speaker_id][subject_id]
+
+
+def _six_villager_ids() -> list[VillagerId]:
+    """Return the canonical six-villager fixture used by context tests."""
+
+    return [
+        VillagerId("aldric"),
+        VillagerId("maren"),
+        VillagerId("ivette"),
+        VillagerId("tobin"),
+        VillagerId("sylvi"),
+        VillagerId("osric"),
+    ]
 
 
 def test_init_builds_empty_per_villager_structures(tmp_path: Path) -> None:
@@ -331,3 +350,264 @@ def test_write_impressions_isolated_by_ordered_pair(tmp_path: Path) -> None:
     assert _relationship_record(memory_system, maren, aldric).recent_impressions == [
         "imp2"
     ]
+
+
+def test_trigger_snapshot_captures_active_context_log(tmp_path: Path) -> None:
+    """Snapshots preserve each villager's current event log entries."""
+
+    villager_ids = _six_villager_ids()
+    aldric = villager_ids[0]
+    maren = villager_ids[1]
+    memory_system = _make_memory_system(villager_ids, tmp_path / "events.jsonl")
+    first = EventLogEntry(game_time=1, type=EventType.ACTION, text="Aldric woke up.")
+    second = EventLogEntry(game_time=2, type=EventType.THOUGHT, text="Need more wood.")
+    third = EventLogEntry(game_time=3, type=EventType.BASE_EVENT, text="Rain started.")
+
+    memory_system.append_event(aldric, first)
+    memory_system.append_event(aldric, second)
+    memory_system.append_event(maren, third)
+
+    snapshot = memory_system.trigger_snapshot()
+
+    assert snapshot.active_context_log[aldric] == [first, second]
+    assert snapshot.active_context_log[maren] == [third]
+    for villager_id in villager_ids[2:]:
+        assert snapshot.active_context_log[villager_id] == []
+
+
+def test_trigger_snapshot_captures_empty_memory_tiers(tmp_path: Path) -> None:
+    """Snapshots include every villager key even when all memory tiers are empty."""
+
+    villager_ids = _six_villager_ids()
+    memory_system = _make_memory_system(villager_ids, tmp_path / "events.jsonl")
+
+    snapshot = memory_system.trigger_snapshot()
+
+    for memory_map in [
+        snapshot.short_term_memories,
+        snapshot.medium_term_memories,
+        snapshot.long_term_memories,
+    ]:
+        assert set(memory_map.keys()) == set(villager_ids)
+        for villager_id in villager_ids:
+            assert memory_map[villager_id] == []
+
+
+def test_trigger_snapshot_captures_relationships_with_defaults(tmp_path: Path) -> None:
+    """Snapshots include every directed relationship with the default description."""
+
+    villager_ids = _six_villager_ids()
+    aldric = villager_ids[0]
+    maren = villager_ids[1]
+    memory_system = _make_memory_system(villager_ids, tmp_path / "events.jsonl")
+
+    snapshot = memory_system.trigger_snapshot()
+
+    assert (
+        snapshot.relationships[aldric][maren].description
+        == _UNKNOWN_RELATIONSHIP_DESCRIPTION
+    )
+    total_pairs = 0
+    for villager_id in villager_ids:
+        assert villager_id not in snapshot.relationships[villager_id]
+        for other_villager_id in villager_ids:
+            if other_villager_id == villager_id:
+                continue
+            total_pairs += 1
+            assert other_villager_id in snapshot.relationships[villager_id]
+    assert total_pairs == len(villager_ids) * (len(villager_ids) - 1)
+
+
+def test_trigger_snapshot_captures_populated_relationships(tmp_path: Path) -> None:
+    """Snapshots reflect relationship mutations already present in live state."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+
+    memory_system.write_impressions(
+        aldric,
+        maren,
+        "Shared watch duty.",
+        "Dependable at night.",
+    )
+
+    snapshot = memory_system.trigger_snapshot()
+
+    assert snapshot.relationships[aldric][maren] == RelationshipRecord(
+        description="Dependable at night.",
+        recent_impressions=["Shared watch duty."],
+    )
+
+
+def test_trigger_snapshot_is_deep_copy(tmp_path: Path) -> None:
+    """Snapshots remain frozen when the live system mutates afterward."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    first = EventLogEntry(game_time=1, type=EventType.ACTION, text="Aldric woke up.")
+    second = EventLogEntry(game_time=2, type=EventType.ACTION, text="Aldric ate.")
+
+    memory_system.append_event(aldric, first)
+    snapshot = memory_system.trigger_snapshot()
+    memory_system.append_event(aldric, second)
+
+    assert snapshot.active_context_log[aldric] == [first]
+
+
+def test_from_snapshot_round_trips_active_context_log(tmp_path: Path) -> None:
+    """Reconstruction restores the active context log exactly as snapshotted."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    event_log_path = tmp_path / "events.jsonl"
+    memory_system = _make_memory_system([aldric, maren], event_log_path)
+    first = EventLogEntry(game_time=1, type=EventType.ACTION, text="Aldric woke up.")
+    second = EventLogEntry(game_time=2, type=EventType.THOUGHT, text="Need more wood.")
+
+    memory_system.append_event(aldric, first)
+    memory_system.append_event(maren, second)
+    snapshot = memory_system.trigger_snapshot()
+
+    restored = MemorySystem.from_snapshot(
+        snapshot,
+        llm_client=_make_llm_client(),
+        event_log_path=event_log_path,
+    )
+
+    assert restored._active_context_log == snapshot.active_context_log
+
+
+def test_from_snapshot_round_trips_relationships(tmp_path: Path) -> None:
+    """Reconstruction restores all updated relationship records."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    ivette = VillagerId("ivette")
+    event_log_path = tmp_path / "events.jsonl"
+    memory_system = _make_memory_system([aldric, maren, ivette], event_log_path)
+
+    memory_system.write_impressions(aldric, maren, "Shared bread.", "Generous.")
+    memory_system.write_impressions(maren, aldric, "Kept watch.", None)
+    memory_system.write_impressions(ivette, aldric, "Worked silently.", "Reserved.")
+    snapshot = memory_system.trigger_snapshot()
+
+    restored = MemorySystem.from_snapshot(
+        snapshot,
+        llm_client=_make_llm_client(),
+        event_log_path=event_log_path,
+    )
+
+    assert restored._relationships == snapshot.relationships
+
+
+def test_from_snapshot_round_trips_memory_tiers(tmp_path: Path) -> None:
+    """Reconstruction restores all memory tiers, including directly injected entries."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    event_log_path = tmp_path / "events.jsonl"
+    memory_system = _make_memory_system([aldric, maren], event_log_path)
+    short_term_entry = MemoryEntry(game_time=10, text="Aldric gathered wood.")
+    medium_term_entry = MemoryEntry(game_time=20, text="Aldric had a steady morning.")
+    long_term_entry = MemoryEntry(game_time=30, text="Maren is consistently cautious.")
+
+    memory_system._short_term_memories[aldric].append(short_term_entry)
+    memory_system._medium_term_memories[aldric].append(medium_term_entry)
+    memory_system._long_term_memories[maren].append(long_term_entry)
+    snapshot = memory_system.trigger_snapshot()
+
+    restored = MemorySystem.from_snapshot(
+        snapshot,
+        llm_client=_make_llm_client(),
+        event_log_path=event_log_path,
+    )
+
+    assert restored._short_term_memories == snapshot.short_term_memories
+    assert restored._medium_term_memories == snapshot.medium_term_memories
+    assert restored._long_term_memories == snapshot.long_term_memories
+
+
+def test_from_snapshot_restores_last_long_term_compaction_day(tmp_path: Path) -> None:
+    """Reconstruction restores the last long-term compaction day counter."""
+
+    aldric = VillagerId("aldric")
+    event_log_path = tmp_path / "events.jsonl"
+    memory_system = _make_memory_system([aldric], event_log_path)
+    memory_system._last_long_term_compaction_day = 6
+    snapshot = memory_system.trigger_snapshot()
+
+    restored = MemorySystem.from_snapshot(
+        snapshot,
+        llm_client=_make_llm_client(),
+        event_log_path=event_log_path,
+    )
+
+    assert restored._last_long_term_compaction_day == 6
+
+
+def test_get_memory_context_relationships_has_exactly_five_entries(
+    tmp_path: Path,
+) -> None:
+    """Context excludes self and includes one relationship per other villager."""
+
+    villager_ids = _six_villager_ids()
+    aldric = villager_ids[0]
+    memory_system = _make_memory_system(villager_ids, tmp_path / "events.jsonl")
+
+    context = memory_system.get_memory_context(aldric)
+
+    assert len(context.relationships) == 5
+    assert aldric not in context.relationships
+
+
+def test_get_memory_context_relationship_values_match_live_state(tmp_path: Path) -> None:
+    """Context relationships mirror the current live relationship state."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+
+    memory_system.write_impressions(
+        aldric,
+        maren,
+        "Shared watch duty.",
+        "Dependable at night.",
+    )
+
+    context = memory_system.get_memory_context(aldric)
+
+    assert context.relationships[maren] == RelationshipRecord(
+        description="Dependable at night.",
+        recent_impressions=["Shared watch duty."],
+    )
+
+
+def test_get_memory_context_active_context_log_matches_live_state(
+    tmp_path: Path,
+) -> None:
+    """Context exposes the live active-context entries in chronological order."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    first = EventLogEntry(game_time=1, type=EventType.ACTION, text="Aldric woke up.")
+    second = EventLogEntry(game_time=2, type=EventType.THOUGHT, text="Need more wood.")
+
+    memory_system.append_event(aldric, first)
+    memory_system.append_event(aldric, second)
+    context = memory_system.get_memory_context(aldric)
+
+    assert context.active_context_log == [first, second]
+
+
+def test_get_memory_context_all_memory_tiers_initially_empty(tmp_path: Path) -> None:
+    """Fresh context starts with empty long-, medium-, and short-term memory lists."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+
+    context = memory_system.get_memory_context(aldric)
+
+    assert context.long_term_memories == []
+    assert context.medium_term_memories == []
+    assert context.short_term_memories == []
