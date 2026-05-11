@@ -17,6 +17,7 @@ from villmage.ai_coordinator.types import ConversationTurn
 from villmage.ai_coordinator.types import (
     ConvActionType,
     ConversationTurnResult,
+    RelationshipUpdateResult,
     TradeActionType,
     TradeItemSpec,
     TradeTurnResult,
@@ -54,11 +55,25 @@ class _MemoryRecorder:
         """Initialize the in-memory event collection."""
 
         self.events_by_villager: dict[str, list[EventLogEntry]] = {}
+        self.impression_writes: list[tuple[str, str, str, str | None]] = []
 
     def append_event(self, villager_id: MemoryVillagerId, entry: EventLogEntry) -> None:
         """Record one appended event under the villager's stable id."""
 
         self.events_by_villager.setdefault(str(villager_id), []).append(entry)
+
+    def write_impressions(
+        self,
+        speaker_id: str,
+        subject_id: str,
+        impression: str,
+        desc_update: str | None,
+    ) -> None:
+        """Record one directional relationship-memory update."""
+
+        self.impression_writes.append(
+            (speaker_id, subject_id, impression, desc_update)
+        )
 
 
 def _current_action(
@@ -1176,3 +1191,179 @@ def test_run_turn_loop_suspends_for_trade_then_resumes_without_trade_time_cost()
     assert resolve_call_count == 3
     assert trade_calls == [("initiator", "partner", 325)]
     assert session.elapsed_game_minutes == 15
+
+
+def test_apply_post_conversation_updates_includes_early_leavers_and_uses_per_villager_snapshot() -> None:
+    """Early leavers still receive aftermath updates using their own sliced snapshot."""
+
+    coordinator = Mock()
+    coordinator.get_social_score.side_effect = [7, 4]
+    coordinator.get_relationship_update.side_effect = [
+        RelationshipUpdateResult(impression="A on B", desc_update="desc a"),
+        RelationshipUpdateResult(impression="B on A", desc_update=None),
+    ]
+    memory = _MemoryRecorder()
+    leaver_state = _villager_state("leaver")
+    leaver_state.social_joy = 98.0
+    leaver_state.connectedness = 60.0
+    stayer_state = _villager_state("stayer")
+    stayer_state.social_joy = 2.0
+    stayer_state.connectedness = 70.0
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        memory_system=memory,
+        villager_states={
+            "leaver": leaver_state,
+            "stayer": stayer_state,
+        },
+    )
+    session = ConversationSession(
+        participant_ids=["stayer"],
+        all_participant_ids=["leaver", "stayer"],
+        full_turn_log=[
+            ConversationTurn(villager_id="leaver", text="Turn 0."),
+            ConversationTurn(villager_id="stayer", text="Turn 1."),
+            ConversationTurn(villager_id="leaver", text="Leaver leaves the conversation."),
+            ConversationTurn(villager_id="stayer", text="Turn 3."),
+        ],
+        join_turn_index={"leaver": 1, "stayer": 0},
+        elapsed_game_minutes=20,
+        last_spoke_turn={"stayer": 3},
+    )
+
+    asyncio.run(system._apply_post_conversation_updates(session, 400))
+
+    assert leaver_state.social_joy == 100.0
+    assert stayer_state.social_joy == 1.0
+    assert leaver_state.connectedness == 80.0
+    assert stayer_state.connectedness == 90.0
+    leaver_snapshot = coordinator.get_social_score.call_args_list[0].args[1]
+    stayer_snapshot = coordinator.get_social_score.call_args_list[1].args[1]
+    assert [turn.text for turn in leaver_snapshot.history] == [
+        "Turn 1.",
+        "Leaver leaves the conversation.",
+        "Turn 3.",
+    ]
+    assert [turn.text for turn in stayer_snapshot.history] == [
+        "Turn 0.",
+        "Turn 1.",
+        "Leaver leaves the conversation.",
+        "Turn 3.",
+    ]
+    assert memory.impression_writes == [
+        ("leaver", "stayer", "A on B", "desc a"),
+        ("stayer", "leaver", "B on A", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("starting_social_joy", "score", "expected_social_joy"),
+    [
+        (40.0, 10, 45.0),
+        (40.0, 0, 35.0),
+        (40.0, 5, 40.0),
+        (98.0, 10, 100.0),
+        (2.0, 0, 0.0),
+    ],
+)
+def test_apply_post_conversation_updates_applies_clipped_social_joy_delta(
+    starting_social_joy: float,
+    score: int,
+    expected_social_joy: float,
+) -> None:
+    """Social joy applies `score - 5` and clamps through `modify_stat`."""
+
+    coordinator = Mock()
+    coordinator.get_social_score.return_value = score
+    coordinator.get_relationship_update.return_value = RelationshipUpdateResult(
+        impression="unused",
+        desc_update=None,
+    )
+    villager_state = _villager_state("solo")
+    villager_state.social_joy = starting_social_joy
+    villager_state.connectedness = 10.0
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        memory_system=_MemoryRecorder(),
+        villager_states={"solo": villager_state},
+    )
+    session = ConversationSession(
+        participant_ids=["solo"],
+        all_participant_ids=["solo"],
+        full_turn_log=[ConversationTurn(villager_id="solo", text="Only turn.")],
+        join_turn_index={"solo": 0},
+        elapsed_game_minutes=5,
+        last_spoke_turn={"solo": 0},
+    )
+
+    asyncio.run(system._apply_post_conversation_updates(session, 405))
+
+    assert villager_state.social_joy == expected_social_joy
+    assert villager_state.connectedness == 30.0
+    coordinator.get_relationship_update.assert_not_called()
+
+
+def test_apply_post_conversation_updates_queries_all_ordered_relationship_pairs() -> None:
+    """Every non-self ordered participant pair produces one impression write."""
+
+    coordinator = Mock()
+    coordinator.get_social_score.side_effect = [5, 5, 5]
+
+    def _relationship_update(
+        speaker_id: str,
+        subject_id: str,
+        _snapshot: object,
+        _game_time: int,
+    ) -> RelationshipUpdateResult:
+        """Return a distinct result for each ordered pair."""
+
+        return RelationshipUpdateResult(
+            impression=f"{speaker_id}->{subject_id}",
+            desc_update=f"desc:{speaker_id}->{subject_id}",
+        )
+
+    coordinator.get_relationship_update.side_effect = _relationship_update
+    memory = _MemoryRecorder()
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        memory_system=memory,
+        villager_states={
+            "a": _villager_state("a"),
+            "b": _villager_state("b"),
+            "c": _villager_state("c"),
+        },
+    )
+    session = ConversationSession(
+        participant_ids=["a", "b", "c"],
+        all_participant_ids=["a", "b", "c"],
+        full_turn_log=[
+            ConversationTurn(villager_id="a", text="Turn 0."),
+            ConversationTurn(villager_id="b", text="Turn 1."),
+        ],
+        join_turn_index={"a": 0, "b": 0, "c": 0},
+        elapsed_game_minutes=10,
+        last_spoke_turn={"a": 0, "b": 1},
+    )
+
+    asyncio.run(system._apply_post_conversation_updates(session, 410))
+
+    ordered_pairs = [
+        (call.args[0], call.args[1])
+        for call in coordinator.get_relationship_update.call_args_list
+    ]
+    assert ordered_pairs == [
+        ("a", "b"),
+        ("a", "c"),
+        ("b", "a"),
+        ("b", "c"),
+        ("c", "a"),
+        ("c", "b"),
+    ]
+    assert memory.impression_writes == [
+        ("a", "b", "a->b", "desc:a->b"),
+        ("a", "c", "a->c", "desc:a->c"),
+        ("b", "a", "b->a", "desc:b->a"),
+        ("b", "c", "b->c", "desc:b->c"),
+        ("c", "a", "c->a", "desc:c->a"),
+        ("c", "b", "c->b", "desc:c->b"),
+    ]

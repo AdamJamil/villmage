@@ -17,6 +17,7 @@ from villmage.ai_coordinator.types import (
     ConversationSnapshot,
     ConversationTurn,
     ConversationTurnResult,
+    RelationshipUpdateResult,
     TradeActionType,
     TradeItemSpec,
     TradeSnapshot,
@@ -54,6 +55,23 @@ class _AICoordinatorProtocol(Protocol):
     ) -> TradeTurnResult | Awaitable[TradeTurnResult]:
         """Return one villager's trade-turn decision."""
 
+    def get_social_score(
+        self,
+        villager_id: str,
+        snapshot: ConversationSnapshot,
+        game_time: int,
+    ) -> int | Awaitable[int]:
+        """Return one villager's post-conversation social score."""
+
+    def get_relationship_update(
+        self,
+        speaker_id: str,
+        subject_id: str,
+        snapshot: ConversationSnapshot,
+        game_time: int,
+    ) -> RelationshipUpdateResult | Awaitable[RelationshipUpdateResult]:
+        """Return one directional post-conversation relationship update."""
+
 
 class _MemorySystemProtocol(Protocol):
     """Minimal memory-system surface required by ConversationSystem."""
@@ -64,6 +82,15 @@ class _MemorySystemProtocol(Protocol):
         entry: EventLogEntry,
     ) -> None:
         """Append one event to one villager's memory log."""
+
+    def write_impressions(
+        self,
+        speaker_id: str,
+        subject_id: str,
+        impression: str,
+        desc_update: str | None,
+    ) -> None:
+        """Persist one directional post-conversation relationship update."""
 
 
 class _CharacterCanonProtocol(Protocol):
@@ -332,6 +359,104 @@ class ConversationSystem:
                     trade_partner_id=trade_partner_id,
                     game_time=game_time,
                 )
+
+    async def _apply_post_conversation_updates(
+        self,
+        session: ConversationSession,
+        game_time: int,
+    ) -> None:
+        """Apply social and relationship aftermath for every conversation participant."""
+
+        await asyncio.gather(
+            *[
+                self._apply_post_conversation_updates_for_participant(
+                    villager_id,
+                    session,
+                    game_time,
+                )
+                for villager_id in session.all_participant_ids
+            ]
+        )
+
+    async def _apply_post_conversation_updates_for_participant(
+        self,
+        villager_id: str,
+        session: ConversationSession,
+        game_time: int,
+    ) -> None:
+        """Apply one participant's post-conversation stat and relationship updates."""
+
+        snapshot = session.snapshot_for(villager_id)
+        social_score_task = self._get_social_score(villager_id, snapshot, game_time)
+        relationship_tasks = [
+            self._get_relationship_update(
+                villager_id,
+                subject_id,
+                snapshot,
+                game_time,
+            )
+            for subject_id in session.all_participant_ids
+            if subject_id != villager_id
+        ]
+        social_score, relationship_updates = await asyncio.gather(
+            social_score_task,
+            self._gather_relationship_updates(relationship_tasks),
+        )
+        villager_state = self._require_villager_states()[villager_id]
+        villager_state.modify_stat("social_joy", float(social_score - 5))
+        villager_state.modify_stat("connectedness", 20.0)
+        memory_system = self._require_memory_system()
+        for subject_id, update in relationship_updates:
+            memory_system.write_impressions(
+                villager_id,
+                subject_id,
+                update.impression,
+                update.desc_update,
+            )
+
+    async def _get_social_score(
+        self,
+        villager_id: str,
+        snapshot: ConversationSnapshot,
+        game_time: int,
+    ) -> int:
+        """Return one participant's post-conversation social score."""
+
+        ai_coordinator = self._require_ai_coordinator()
+        result_object = ai_coordinator.get_social_score(villager_id, snapshot, game_time)
+        return cast(int, await self._resolve_maybe_awaitable(result_object))
+
+    async def _get_relationship_update(
+        self,
+        speaker_id: str,
+        subject_id: str,
+        snapshot: ConversationSnapshot,
+        game_time: int,
+    ) -> tuple[str, RelationshipUpdateResult]:
+        """Return one ordered-pair relationship update keyed by subject id."""
+
+        ai_coordinator = self._require_ai_coordinator()
+        result_object = ai_coordinator.get_relationship_update(
+            speaker_id,
+            subject_id,
+            snapshot,
+            game_time,
+        )
+        result = cast(
+            RelationshipUpdateResult,
+            await self._resolve_maybe_awaitable(result_object),
+        )
+        return (subject_id, result)
+
+    async def _gather_relationship_updates(
+        self,
+        tasks: list[Awaitable[tuple[str, RelationshipUpdateResult]]],
+    ) -> list[tuple[str, RelationshipUpdateResult]]:
+        """Await one participant's ordered-pair relationship updates together."""
+
+        if not tasks:
+            return []
+        return list(await asyncio.gather(*tasks))
 
     async def _get_join_decision(
         self,
@@ -718,20 +843,33 @@ class ConversationSystem:
         value: (
             Awaitable[ConversationTurnResult]
             | Awaitable[TradeTurnResult]
+            | Awaitable[RelationshipUpdateResult]
             | Awaitable[bool]
+            | Awaitable[int]
             | ConversationTurnResult
             | TradeTurnResult
+            | RelationshipUpdateResult
             | bool
+            | int
         ),
-    ) -> ConversationTurnResult | TradeTurnResult | bool:
+    ) -> ConversationTurnResult | TradeTurnResult | RelationshipUpdateResult | bool | int:
         """Await asynchronous dependency results while preserving sync call support."""
 
         if inspect.isawaitable(value):
             return await cast(
-                Awaitable[ConversationTurnResult | TradeTurnResult | bool],
+                Awaitable[
+                    ConversationTurnResult
+                    | TradeTurnResult
+                    | RelationshipUpdateResult
+                    | bool
+                    | int
+                ],
                 value,
             )
-        return cast(ConversationTurnResult | TradeTurnResult | bool, value)
+        return cast(
+            ConversationTurnResult | TradeTurnResult | RelationshipUpdateResult | bool | int,
+            value,
+        )
 
     def _require_ai_coordinator(self) -> _AICoordinatorProtocol:
         """Return the configured AI coordinator or fail fast."""
