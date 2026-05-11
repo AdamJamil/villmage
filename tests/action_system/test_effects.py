@@ -440,6 +440,184 @@ def test_rest_completion_is_a_no_op() -> None:
     assert ctx.ws.__dict__ == before_ws.__dict__
 
 
+def test_scrape_hide_transforms_inventory_items() -> None:
+    """Scraping should turn raw hides in inventory into processed hides."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.RAW_HIDE, 3)
+
+    apply_completion_effect(make_action(ActionType.SCRAPE_HIDE, quantity=2), ctx, 0)
+
+    assert ctx.vs.inventory[ItemType.RAW_HIDE] == 1
+    assert ctx.vs.inventory[ItemType.PROCESSED_HIDE] == 2
+
+
+def test_scrape_hide_draws_from_inventory_then_base() -> None:
+    """Scraping should exhaust carried hides before stored hides."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.RAW_HIDE, 1)
+    ctx.ws.modify_base_item(ItemType.RAW_HIDE, 2)
+
+    apply_completion_effect(make_action(ActionType.SCRAPE_HIDE, quantity=2), ctx, 0)
+
+    assert ctx.vs.inventory[ItemType.RAW_HIDE] == 0
+    assert ctx.ws.base_storage[ItemType.RAW_HIDE] == 1
+    assert ctx.vs.inventory[ItemType.PROCESSED_HIDE] == 2
+
+
+def test_haul_water_adds_water_supply() -> None:
+    """Hauling should add the authored 20 liters to base water supply."""
+
+    ctx = make_ctx()
+
+    apply_completion_effect(make_action(ActionType.HAUL_WATER), ctx, 0)
+
+    assert ctx.ws.water_supply_ml == 20_000
+
+
+def test_haul_water_charges_authored_calories() -> None:
+    """Hauling should charge the authored 200-calorie activity cost."""
+
+    ctx = make_ctx()
+    ctx.vs.satiation = 1800.0
+
+    apply_completion_effect(make_action(ActionType.HAUL_WATER), ctx, 0)
+
+    assert ctx.vs.satiation == 1600.0
+
+
+def test_butcher_carcass_produces_raw_meat() -> None:
+    """Butchering should consume one carcass and add authored raw meat."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    ctx.ws.add_carcass(100)
+
+    apply_completion_effect(make_action(ActionType.BUTCHER_CARCASS), ctx, 0)
+
+    assert ctx.vs.inventory[ItemType.CARCASS] == 0
+    assert ctx.vs.inventory[ItemType.RAW_MEAT] == 14
+
+
+def test_butcher_carcass_removes_tracker_and_adds_dirtiness() -> None:
+    """Butchering should remove the carcass tracker and add remains dirtiness."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    ctx.ws.add_carcass(100)
+
+    apply_completion_effect(make_action(ActionType.BUTCHER_CARCASS), ctx, 0)
+
+    assert ctx.ws.live_carcasses == []
+    assert ctx.ws.get_total_dirtiness() == 30
+
+
+def test_butcher_carcass_applies_cleanliness_penalty() -> None:
+    """Butchering should reduce cleanliness by the authored fixed penalty."""
+
+    ctx = make_ctx()
+    ctx.vs.cleanliness = 80.0
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    ctx.ws.add_carcass(100)
+
+    apply_completion_effect(make_action(ActionType.BUTCHER_CARCASS), ctx, 0)
+
+    assert ctx.vs.cleanliness == 30.0
+
+
+def test_butcher_carcass_cleanliness_floors_at_zero() -> None:
+    """Butchering cleanliness loss should still clamp at zero."""
+
+    ctx = make_ctx()
+    ctx.vs.cleanliness = 30.0
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    ctx.ws.add_carcass(100)
+
+    apply_completion_effect(make_action(ActionType.BUTCHER_CARCASS), ctx, 0)
+
+    assert ctx.vs.cleanliness == 0.0
+
+
+def test_butcher_carcass_charges_authored_calories() -> None:
+    """Butchering should charge the authored 200-calorie activity cost."""
+
+    ctx = make_ctx()
+    ctx.vs.satiation = 1800.0
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    ctx.ws.add_carcass(100)
+
+    apply_completion_effect(make_action(ActionType.BUTCHER_CARCASS), ctx, 0)
+
+    assert ctx.vs.satiation == 1600.0
+
+
+def test_butcher_carcass_chooses_earliest_tracker() -> None:
+    """Butchering should consume the oldest live carcass tracker first."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    later_carcass_id = ctx.ws.add_carcass(100)
+    ctx.ws.add_carcass(50)
+
+    apply_completion_effect(make_action(ActionType.BUTCHER_CARCASS), ctx, 0)
+
+    assert len(ctx.ws.live_carcasses) == 1
+    assert ctx.ws.live_carcasses[0].id == later_carcass_id
+    assert ctx.ws.live_carcasses[0].arrival_timestamp == 100
+
+
+def test_clean_camp_zeroes_dirtiness() -> None:
+    """Cleaning camp should clear all accumulated dirtiness sources."""
+
+    ctx = make_ctx()
+    ctx.ws.update_cleanliness_source(effects_module.DirtinessSource.CARCASS_REMAINS, 1)
+    ctx.ws.update_cleanliness_source(effects_module.DirtinessSource.MEAT_SCRAPS, 3)
+
+    apply_completion_effect(make_action(ActionType.CLEAN_CAMP), ctx, 0)
+
+    assert ctx.ws.get_total_dirtiness() == 0
+
+
+def test_clean_camp_applies_proportional_cleanliness_penalty() -> None:
+    """Cleaning camp should convert pre-clean dirtiness into cleanliness loss."""
+
+    ctx = make_ctx()
+    ctx.vs.cleanliness = 80.0
+    ctx.ws.update_cleanliness_source(effects_module.DirtinessSource.CARCASS_REMAINS, 1)
+    ctx.ws.update_cleanliness_source(effects_module.DirtinessSource.MEAT_SCRAPS, 3)
+
+    apply_completion_effect(make_action(ActionType.CLEAN_CAMP), ctx, 0)
+
+    assert ctx.vs.cleanliness == 65.0
+
+
+def test_split_logs_transforms_logs_into_firewood() -> None:
+    """Splitting should turn each authored log into two firewood in inventory."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.LOG, 3)
+
+    apply_completion_effect(make_action(ActionType.SPLIT_LOGS, quantity=2), ctx, 0)
+
+    assert ctx.vs.inventory[ItemType.LOG] == 1
+    assert ctx.vs.inventory[ItemType.FIREWOOD] == 4
+
+
+def test_split_logs_draws_from_inventory_then_base() -> None:
+    """Splitting should exhaust carried logs before consuming stored logs."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.LOG, 1)
+    ctx.ws.modify_base_item(ItemType.LOG, 3)
+
+    apply_completion_effect(make_action(ActionType.SPLIT_LOGS, quantity=3), ctx, 0)
+
+    assert ctx.vs.inventory[ItemType.LOG] == 0
+    assert ctx.ws.base_storage[ItemType.LOG] == 1
+    assert ctx.vs.inventory[ItemType.FIREWOOD] == 6
+
+
 @pytest.mark.parametrize(
     ("resource", "expected_item", "yield_count"),
     (

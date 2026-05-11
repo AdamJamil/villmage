@@ -108,6 +108,18 @@ def _deduct_inventory_then_base(
         ctx.ws.modify_base_item(item, -base_to_remove)
 
 
+def _charge_activity_calories(calories: float, ctx: ActionContext) -> None:
+    """Deduct authored activity calories from villager satiation."""
+
+    ctx.vs.modify_stat("satiation", -calories)
+
+
+def _reduce_cleanliness(penalty: float, ctx: ActionContext) -> None:
+    """Deduct authored cleanliness while preserving stat clamping."""
+
+    ctx.vs.modify_stat("cleanliness", -penalty)
+
+
 def _start_craft_new(action: SelectedAction, ctx: ActionContext) -> None:
     """Consume recipe materials and create a fresh crafting-progress record."""
 
@@ -260,6 +272,57 @@ def _complete_wash_up(action: SelectedAction, ctx: ActionContext) -> None:
     ctx.vs.modify_stat("cleanliness", 100.0 - ctx.vs.cleanliness)
 
 
+def _complete_scrape_hide(action: SelectedAction, ctx: ActionContext) -> None:
+    """Turn raw hides from inventory/base into processed hides in inventory."""
+
+    quantity = _require_quantity(action)
+    _deduct_inventory_then_base(ItemType.RAW_HIDE, quantity, ctx)
+    ctx.vs.modify_inventory(ItemType.PROCESSED_HIDE, quantity)
+
+
+def _complete_haul_water(action: SelectedAction, ctx: ActionContext) -> None:
+    """Add hauled water to base supply and charge authored calories."""
+
+    del action
+    ctx.ws.modify_water(20_000)
+    _charge_activity_calories(200.0, ctx)
+
+
+def _earliest_live_carcass_id(ctx: ActionContext) -> int:
+    """Return the oldest tracked live carcass id, or raise if none exist."""
+
+    if not ctx.ws.live_carcasses:
+        raise ValueError("No live carcass available to butcher.")
+    return ctx.ws.live_carcasses[0].id
+
+
+def _complete_butcher_carcass(action: SelectedAction, ctx: ActionContext) -> None:
+    """Convert the oldest tracked carcass into meat, dirtiness, and stat costs."""
+
+    del action
+    ctx.vs.modify_inventory(ItemType.CARCASS, -1)
+    ctx.ws.remove_carcass(_earliest_live_carcass_id(ctx))
+    ctx.vs.modify_inventory(ItemType.RAW_MEAT, 14)
+    _reduce_cleanliness(50.0, ctx)
+    _charge_activity_calories(200.0, ctx)
+
+
+def _complete_clean_camp(action: SelectedAction, ctx: ActionContext) -> None:
+    """Clear base dirtiness and apply the proportional cleanliness penalty."""
+
+    del action
+    total_dirtiness = ctx.ws.clear_dirtiness()
+    _reduce_cleanliness(total_dirtiness / 3.0, ctx)
+
+
+def _complete_split_logs(action: SelectedAction, ctx: ActionContext) -> None:
+    """Turn carried/stored logs into twice as much carried firewood."""
+
+    quantity = _require_quantity(action)
+    _deduct_inventory_then_base(ItemType.LOG, quantity, ctx)
+    ctx.vs.modify_inventory(ItemType.FIREWOOD, quantity * 2)
+
+
 def apply_start_effect(action: SelectedAction, ctx: ActionContext) -> None:
     """Dispatch start-effect handler for the given action type."""
 
@@ -308,5 +371,15 @@ def apply_completion_effect(
             )
         case ActionType.WASH_UP:
             _complete_wash_up(action, ctx)
+        case ActionType.SCRAPE_HIDE:
+            _complete_scrape_hide(action, ctx)
+        case ActionType.HAUL_WATER:
+            _complete_haul_water(action, ctx)
+        case ActionType.BUTCHER_CARCASS:
+            _complete_butcher_carcass(action, ctx)
+        case ActionType.CLEAN_CAMP:
+            _complete_clean_camp(action, ctx)
+        case ActionType.SPLIT_LOGS:
+            _complete_split_logs(action, ctx)
         case _:
             return
