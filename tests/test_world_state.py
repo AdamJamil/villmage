@@ -4,7 +4,7 @@
 
 import pytest
 
-from villmage.game_types import ItemType
+from villmage.game_types import ItemType, RestingSpotType
 from villmage.world_state import (
     DIRTINESS_PENALTY,
     FUEL_BURN_DURATION_MINUTES,
@@ -468,6 +468,38 @@ def test_clear_dirtiness_on_clean_state_returns_zero() -> None:
     world_state = WorldState()
 
     assert world_state.clear_dirtiness() == 0
+
+
+def test_has_placed_spot_starts_false() -> None:
+    """Fresh world state starts with no placed resting spots."""
+
+    world_state = WorldState()
+
+    assert world_state.has_placed_spot("aldric") is False
+
+
+def test_place_resting_spot_records_spot_type_and_presence() -> None:
+    """Placed resting spots are stored by villager id with their exact type."""
+
+    world_state = WorldState()
+
+    world_state.place_resting_spot("aldric", RestingSpotType.BED_ROLL)
+
+    assert world_state.has_placed_spot("aldric") is True
+    assert world_state.placed_resting_spots["aldric"] is RestingSpotType.BED_ROLL
+
+
+def test_place_resting_spot_keeps_villagers_isolated() -> None:
+    """One villager's placed spot does not affect another villager's entry."""
+
+    world_state = WorldState()
+    world_state.place_resting_spot("aldric", RestingSpotType.BED_ROLL)
+    world_state.place_resting_spot("sewalt", RestingSpotType.COT)
+
+    assert world_state.has_placed_spot("aldric") is True
+    assert world_state.has_placed_spot("sewalt") is True
+    assert world_state.placed_resting_spots["aldric"] is RestingSpotType.BED_ROLL
+    assert world_state.placed_resting_spots["sewalt"] is RestingSpotType.COT
 
 
 def test_update_cleanliness_source_supports_decrement() -> None:

@@ -134,6 +134,15 @@ class WorldState:
             self.dirtiness_counts[source] = 0
         return total_dirtiness
 
+    def place_resting_spot(
+        self,
+        villager_id: str,
+        spot_type: RestingSpotType,
+    ) -> None:
+        """Record the resting spot a villager has physically placed on the ground."""
+
+        self.placed_resting_spots[villager_id] = spot_type
+
     def _get_queued_fuel_minutes(self) -> int:
         """Return the total burn minutes represented by the queued fuel."""
 
@@ -234,3 +243,8 @@ class WorldState:
             for source in DirtinessSource
         )
         return min(100, total_dirtiness)
+
+    def has_placed_spot(self, villager_id: str) -> bool:
+        """Return whether the villager currently has a resting spot on the ground."""
+
+        return villager_id in self.placed_resting_spots
