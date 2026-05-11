@@ -1,0 +1,3 @@
+{"game_time":400,"kind":1,"villager_id":"aldric","changes":[{"field":"wakefulness","old_value":"100","new_value":"85"}]}
+{"game_time":400,"kind":3,"changes":[{"field":"fire.lit","old_value":"false","new_value":"true"}]}
+{"game_time":600,"kind":2,"villager_id":"aldric","changes":[{"field":"PEACH","old_value":"1","new_value":"2"}]}
