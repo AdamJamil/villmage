@@ -6,6 +6,7 @@ import pytest
 
 from villmage.game_types import ItemType, RestingSpotType
 from villmage.world_state import (
+    Carcass,
     DIRTINESS_PENALTY,
     FUEL_BURN_DURATION_MINUTES,
     DirtinessSource,
@@ -511,3 +512,108 @@ def test_update_cleanliness_source_supports_decrement() -> None:
     world_state.update_cleanliness_source(DirtinessSource.MEAT_SCRAPS, -1)
 
     assert world_state.get_total_dirtiness() == 5
+
+
+def test_add_carcass_first_id_is_one_and_increments_counter() -> None:
+    """The first tracked carcass receives id 1 and advances the next-id counter."""
+
+    world_state = WorldState()
+
+    carcass_id = world_state.add_carcass(arrival_timestamp=0)
+
+    assert carcass_id == 1
+    assert world_state.next_carcass_id == 2
+
+
+def test_add_carcass_auto_increments_ids() -> None:
+    """Sequential carcass registration uses monotonically increasing ids."""
+
+    world_state = WorldState()
+
+    first_id = world_state.add_carcass(arrival_timestamp=0)
+    second_id = world_state.add_carcass(arrival_timestamp=10)
+    third_id = world_state.add_carcass(arrival_timestamp=20)
+
+    assert (first_id, second_id, third_id) == (1, 2, 3)
+
+
+def test_add_carcass_populates_live_carcasses() -> None:
+    """Adding a carcass stores exactly one tracker with the assigned id and timestamp."""
+
+    world_state = WorldState()
+
+    world_state.add_carcass(arrival_timestamp=500)
+
+    assert world_state.live_carcasses == [Carcass(id=1, arrival_timestamp=500)]
+
+
+def test_add_carcass_maintains_ascending_arrival_timestamp_sort() -> None:
+    """Tracked carcasses stay sorted oldest-first regardless of insertion order."""
+
+    world_state = WorldState()
+
+    world_state.add_carcass(arrival_timestamp=100)
+    world_state.add_carcass(arrival_timestamp=50)
+
+    assert world_state.live_carcasses == [
+        Carcass(id=2, arrival_timestamp=50),
+        Carcass(id=1, arrival_timestamp=100),
+    ]
+
+
+def test_remove_carcass_removes_only_the_matching_tracker() -> None:
+    """Removing one carcass leaves the other tracked carcasses untouched."""
+
+    world_state = WorldState()
+
+    world_state.add_carcass(arrival_timestamp=0)
+    world_state.add_carcass(arrival_timestamp=100)
+    world_state.add_carcass(arrival_timestamp=200)
+
+    world_state.remove_carcass(carcass_id=2)
+
+    assert world_state.live_carcasses == [
+        Carcass(id=1, arrival_timestamp=0),
+        Carcass(id=3, arrival_timestamp=200),
+    ]
+
+
+def test_remove_carcass_increments_carcass_remains_dirtiness() -> None:
+    """Each carcass removal contributes one carcass-remains dirtiness unit."""
+
+    world_state = WorldState()
+    carcass_id = world_state.add_carcass(arrival_timestamp=0)
+
+    world_state.remove_carcass(carcass_id)
+
+    assert world_state.get_total_dirtiness() == 30
+
+
+def test_remove_carcass_raises_for_unknown_id() -> None:
+    """Removing an untracked carcass id raises instead of silently drifting state."""
+
+    world_state = WorldState()
+
+    with pytest.raises(ValueError):
+        world_state.remove_carcass(999)
+
+
+def test_remove_carcass_accumulates_dirtiness_and_caps_at_one_hundred() -> None:
+    """Repeated carcass removals stack dirtiness and still respect the global cap."""
+
+    world_state = WorldState()
+
+    three_ids = [
+        world_state.add_carcass(arrival_timestamp=0),
+        world_state.add_carcass(arrival_timestamp=1),
+        world_state.add_carcass(arrival_timestamp=2),
+    ]
+    for carcass_id in three_ids:
+        world_state.remove_carcass(carcass_id)
+
+    assert world_state.get_total_dirtiness() == 90
+
+    fourth_id = world_state.add_carcass(arrival_timestamp=3)
+    world_state.remove_carcass(fourth_id)
+
+    assert world_state.get_total_dirtiness() == 100

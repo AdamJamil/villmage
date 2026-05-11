@@ -143,6 +143,41 @@ class WorldState:
 
         self.placed_resting_spots[villager_id] = spot_type
 
+    def _get_carcass_insert_index(self, arrival_timestamp: int) -> int:
+        """Return the insertion index that preserves ascending carcass timestamps."""
+
+        for index, carcass in enumerate(self.live_carcasses):
+            if arrival_timestamp < carcass.arrival_timestamp:
+                return index
+        return len(self.live_carcasses)
+
+    def _get_live_carcass_index(self, carcass_id: int) -> int:
+        """Return the list index for a tracked carcass id."""
+
+        for index, carcass in enumerate(self.live_carcasses):
+            if carcass.id == carcass_id:
+                return index
+        raise ValueError(f"Unknown carcass id: {carcass_id}.")
+
+    def add_carcass(self, arrival_timestamp: int) -> int:
+        """Track one carcass by id and arrival time, preserving oldest-first order."""
+
+        carcass_id = self.next_carcass_id
+        self.next_carcass_id += 1
+        insert_index = self._get_carcass_insert_index(arrival_timestamp)
+        self.live_carcasses.insert(
+            insert_index,
+            Carcass(id=carcass_id, arrival_timestamp=arrival_timestamp),
+        )
+        return carcass_id
+
+    def remove_carcass(self, carcass_id: int) -> None:
+        """Drop one tracked carcass and add one unit of carcass-remains dirtiness."""
+
+        carcass_index = self._get_live_carcass_index(carcass_id)
+        self.live_carcasses.pop(carcass_index)
+        self.update_cleanliness_source(DirtinessSource.CARCASS_REMAINS, 1)
+
     def _get_queued_fuel_minutes(self) -> int:
         """Return the total burn minutes represented by the queued fuel."""
 
