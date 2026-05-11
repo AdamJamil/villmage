@@ -22,6 +22,7 @@ from villmage.autobalance import AutobalanceMultipliers
 from villmage.events import (
     ActionCompleteEvent,
     CheckpointEvent,
+    FireExtinctionEvent,
     MidnightEvent,
     ScheduledEvent,
     VillagerId,
@@ -199,3 +200,16 @@ class SimulationEngine:
                     MemoryVillagerId(observer_id),
                     death_event,
                 )
+
+    def _sync_fire_event(self) -> None:
+        """Reconcile the heap fire-extinction event with WorldState's fire snapshot."""
+
+        self._cancel(lambda event: isinstance(event, FireExtinctionEvent))
+        extinction_timestamp = self.world_state.fire.extinction_timestamp
+        if self.world_state.fire.lit and extinction_timestamp is not None:
+            self._push(
+                FireExtinctionEvent(
+                    timestamp=extinction_timestamp,
+                    sequence=-1,
+                )
+            )
