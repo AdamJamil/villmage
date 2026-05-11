@@ -83,6 +83,15 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(value, maximum))
 
 
+def _is_sleeping(current_action: CurrentAction | None) -> bool:
+    """Return whether the villager is currently in the sleeping action."""
+
+    return (
+        current_action is not None
+        and current_action.category is ActionCategory.SLEEPING
+    )
+
+
 class VillagerState:
     """Mutable survival ledger for one villager."""
 
@@ -190,3 +199,42 @@ class VillagerState:
         """Reset awake minutes since the last memory compaction."""
 
         self.awake_minutes_since_compaction = 0
+
+    def _compute_health(self) -> float:
+        """Compute the authored health score from wakefulness, satiation, and hydration."""
+
+        wakefulness_pct = self.wakefulness / 100.0
+        satiation_pct = self.satiation / 1800.0
+        hydration_pct = self.hydration / 6000.0
+        satiation_term = (32.0 ** (satiation_pct - 1.0)) - (1.0 / 32.0)
+        health = (
+            max(0.1, wakefulness_pct)
+            * (satiation_term**3)
+            * (hydration_pct**3)
+        ) ** (1.0 / 9.0)
+        return _clamp(health, 0.0, 1.0)
+
+    def apply_decay(self, elapsed_hours: float) -> DecayResult:
+        """Apply passive stat decay for one interval and report threshold crossings."""
+
+        was_awake = not _is_sleeping(self.current_action)
+        previous_wakefulness = self.wakefulness
+
+        if was_awake:
+            self.wakefulness = max(0.0, self.wakefulness - (3.0 * elapsed_hours))
+            self.awake_minutes_since_compaction += int(elapsed_hours * 60.0)
+
+        self.satiation = max(0.0, self.satiation - (18.0 * elapsed_hours))
+        self.hydration = max(0.0, self.hydration - (120.0 * elapsed_hours))
+        self.connectedness = max(
+            0.0,
+            self.connectedness - ((100.0 / 48.0) * elapsed_hours),
+        )
+        self.cleanliness = max(0.0, self.cleanliness - (2.0 * elapsed_hours))
+
+        wakefulness_zero = previous_wakefulness > 0.0 and self.wakefulness == 0.0
+        health_zero = self._compute_health() <= 0.0
+        return DecayResult(
+            health_zero=health_zero,
+            wakefulness_zero=wakefulness_zero,
+        )

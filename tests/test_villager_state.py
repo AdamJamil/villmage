@@ -315,3 +315,219 @@ def test_reset_compaction_counter_sets_awake_minutes_to_zero() -> None:
     villager_state.reset_compaction_counter()
 
     assert villager_state.awake_minutes_since_compaction == 0
+
+
+def _sleeping_action() -> CurrentAction:
+    """Build a minimal sleeping action snapshot for decay tests."""
+
+    return CurrentAction(
+        category=ActionCategory.SLEEPING,
+        detail=None,
+        completion_timestamp=0,
+    )
+
+
+def test_apply_decay_drains_each_authored_stat_rate_while_awake() -> None:
+    """One awake hour applies the authored passive drain to each mutable stat."""
+
+    villager_state = VillagerState("aldric")
+
+    villager_state.apply_decay(1.0)
+
+    assert villager_state.wakefulness == 97.0
+    assert villager_state.satiation == 1782.0
+    assert villager_state.hydration == 5880.0
+    assert villager_state.connectedness == pytest.approx(100.0 - (100.0 / 48.0))
+    assert villager_state.cleanliness == 98.0
+    assert villager_state.social_joy == 20.0
+
+
+def test_apply_decay_skips_only_wakefulness_drain_during_sleep() -> None:
+    """Sleeping suppresses wakefulness decay and awake-time accumulation only."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.set_current_action(_sleeping_action())
+
+    villager_state.apply_decay(1.0)
+
+    assert villager_state.wakefulness == 100.0
+    assert villager_state.satiation == 1782.0
+    assert villager_state.hydration == 5880.0
+    assert villager_state.connectedness == pytest.approx(100.0 - (100.0 / 48.0))
+    assert villager_state.cleanliness == 98.0
+
+
+def test_apply_decay_never_drains_social_joy() -> None:
+    """Passive decay leaves social joy unchanged even over long intervals."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.social_joy = 50.0
+
+    villager_state.apply_decay(24.0)
+
+    assert villager_state.social_joy == 50.0
+
+
+def test_apply_decay_floors_all_stats_at_zero() -> None:
+    """Decay floors every drained stat at zero rather than going negative."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.wakefulness = 1.0
+    villager_state.satiation = 10.0
+    villager_state.hydration = 50.0
+    villager_state.connectedness = 1.0
+    villager_state.cleanliness = 1.0
+    villager_state.social_joy = 0.0
+
+    villager_state.apply_decay(100.0)
+
+    assert villager_state.wakefulness == 0.0
+    assert villager_state.satiation == 0.0
+    assert villager_state.hydration == 0.0
+    assert villager_state.connectedness == 0.0
+    assert villager_state.cleanliness == 0.0
+    assert villager_state.social_joy == 0.0
+
+
+def test_apply_decay_tracks_awake_minutes_while_awake() -> None:
+    """Awake decay increments the compaction counter by elapsed minutes."""
+
+    villager_state = VillagerState("aldric")
+
+    villager_state.apply_decay(2.0)
+
+    assert villager_state.awake_minutes_since_compaction == 120
+
+
+def test_apply_decay_does_not_track_awake_minutes_while_sleeping() -> None:
+    """Sleeping intervals do not add to awake minutes since compaction."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.set_current_action(_sleeping_action())
+
+    villager_state.apply_decay(2.0)
+
+    assert villager_state.awake_minutes_since_compaction == 0
+
+
+def test_apply_decay_accumulates_awake_minutes_across_calls() -> None:
+    """Awake-minute tracking is cumulative across multiple decay applications."""
+
+    villager_state = VillagerState("aldric")
+
+    villager_state.apply_decay(1.0)
+    villager_state.apply_decay(1.0)
+    villager_state.apply_decay(1.0)
+
+    assert villager_state.awake_minutes_since_compaction == 180
+
+
+def test_apply_decay_sets_wakefulness_zero_only_on_crossing() -> None:
+    """Wakefulness threshold fires exactly when a positive value reaches zero."""
+
+    exact_crossing = VillagerState("aldric")
+    exact_crossing.wakefulness = 3.0
+
+    exact_result = exact_crossing.apply_decay(1.0)
+
+    assert exact_result.wakefulness_zero is True
+
+    non_crossing = VillagerState("aldric")
+    non_crossing.wakefulness = 4.0
+
+    non_crossing_result = non_crossing.apply_decay(1.0)
+
+    assert non_crossing_result.wakefulness_zero is False
+
+
+def test_apply_decay_does_not_retrigger_wakefulness_zero_from_zero() -> None:
+    """Wakefulness threshold does not fire when wakefulness started at zero."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.wakefulness = 0.0
+
+    result = villager_state.apply_decay(1.0)
+
+    assert result.wakefulness_zero is False
+
+
+def test_apply_decay_sets_health_zero_when_satiation_hits_zero() -> None:
+    """Satiation draining to zero collapses the health formula to zero."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.wakefulness = 100.0
+    villager_state.satiation = 18.0
+    villager_state.hydration = 6000.0
+
+    result = villager_state.apply_decay(1.0)
+
+    assert result.health_zero is True
+
+
+def test_apply_decay_sets_health_zero_when_hydration_hits_zero() -> None:
+    """Hydration draining to zero collapses the health formula to zero."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.wakefulness = 100.0
+    villager_state.satiation = 1800.0
+    villager_state.hydration = 120.0
+
+    result = villager_state.apply_decay(1.0)
+
+    assert result.health_zero is True
+
+
+def test_apply_decay_wakefulness_zero_alone_does_not_trigger_health_zero() -> None:
+    """Zero wakefulness alone does not kill because the health formula floors wakefulness."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.wakefulness = 3.0
+    villager_state.satiation = 1800.0
+    villager_state.hydration = 6000.0
+
+    result = villager_state.apply_decay(1.0)
+
+    assert result.health_zero is False
+    assert result.wakefulness_zero is True
+
+
+def test_apply_decay_can_set_health_zero_and_wakefulness_zero_together() -> None:
+    """The two threshold flags can fire simultaneously in one decay step."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.wakefulness = 3.0
+    villager_state.satiation = 18.0
+    villager_state.hydration = 6000.0
+
+    result = villager_state.apply_decay(1.0)
+
+    assert result.health_zero is True
+    assert result.wakefulness_zero is True
+
+
+def test_compute_health_is_positive_below_one_at_full_values() -> None:
+    """Full raw values produce a positive health score below one."""
+
+    villager_state = VillagerState("aldric")
+
+    result = villager_state.apply_decay(0.0)
+
+    assert result.health_zero is False
+    assert 0.0 < villager_state._compute_health() < 1.0
+
+
+def test_compute_health_matches_numeric_spot_check() -> None:
+    """The private health helper matches the authored formula numerically."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.wakefulness = 50.0
+    villager_state.satiation = 900.0
+    villager_state.hydration = 3000.0
+
+    expected = (
+        max(0.1, 0.5)
+        * (((32.0 ** (0.5 - 1.0)) - (1.0 / 32.0)) ** 3)
+        * (0.5**3)
+    ) ** (1.0 / 9.0)
+
+    assert villager_state._compute_health() == pytest.approx(expected, abs=1e-6)
