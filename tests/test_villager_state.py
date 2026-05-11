@@ -55,6 +55,7 @@ def test_villager_state_starts_with_spec_defined_values() -> None:
     assert villager_state.inventory == {}
     assert villager_state.sleep_spot_claim is None
     assert villager_state.crafting_in_progress is None
+    assert villager_state.cooking_paused is False
     assert villager_state.current_action is None
     assert villager_state.last_rest_game_time is None
     assert villager_state.awake_minutes_since_compaction == 0

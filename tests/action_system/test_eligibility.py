@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 from action_system.eligibility import (
+    cooking_actions,
+    crafting_actions,
     eating_and_drinking_actions,
     exploration_actions,
     fire_tending_actions,
@@ -15,8 +17,8 @@ from action_system.eligibility import (
 )
 from action_system.types import ActionContext, ActionType, AutobalanceMultipliers, ValidAction
 from character_canon.canon import CharacterCanon
-from villmage.game_types import ItemType, RestingSpotType
-from villmage.villager_state import VillagerState
+from villmage.game_types import CraftableItem, ItemType, RestingSpotType
+from villmage.villager_state import CraftingProgress, VillagerState
 from villmage.world_state import DirtinessSource, FuelType, WorldState
 
 
@@ -56,6 +58,19 @@ def _get_exploration_action(
         if action.action_type is not ActionType.EXPLORE:
             continue
         if f"Explore for {resource_name}" in action.prompt_text:
+            return action
+    return None
+
+
+def _get_action_with_text(
+    actions: list[ValidAction],
+    action_type: ActionType,
+    text: str,
+) -> ValidAction | None:
+    """Return the first action of one type whose prompt contains the given text."""
+
+    for action in actions:
+        if action.action_type is action_type and text in action.prompt_text:
             return action
     return None
 
@@ -548,3 +563,186 @@ def test_misc_actions_only_include_split_logs_when_logs_exist() -> None:
 
     assert split_logs is not None
     assert "1-2" in split_logs.prompt_text
+
+
+def test_crafting_actions_returns_empty_for_non_crafter() -> None:
+    """Crafting is completely hidden from non-CRAFTER villagers."""
+
+    assert crafting_actions(make_ctx("harren")) == []
+
+
+def test_crafting_actions_show_all_recipes_for_crafter_without_materials() -> None:
+    """All three recipes stay visible even when none are currently makeable."""
+
+    actions = crafting_actions(make_ctx("ivette"))
+
+    satchel = _get_action_with_text(actions, ActionType.CRAFT_NEW, "Craft satchel")
+    bed_roll = _get_action_with_text(actions, ActionType.CRAFT_NEW, "Craft bed roll")
+    cot = _get_action_with_text(actions, ActionType.CRAFT_NEW, "Craft cot")
+
+    assert satchel is not None
+    assert satchel.selectable is False
+    assert "Missing materials" in satchel.prompt_text
+    assert bed_roll is not None
+    assert bed_roll.selectable is False
+    assert cot is not None
+    assert cot.selectable is False
+
+
+def test_crafting_actions_make_only_satchel_selectable_when_only_hide_is_available() -> None:
+    """One processed hide unlocks satchel but not the more expensive recipes."""
+
+    ctx = make_ctx("ivette")
+    ctx.vs.modify_inventory(ItemType.PROCESSED_HIDE, 1)
+
+    actions = crafting_actions(ctx)
+
+    satchel = _get_action_with_text(actions, ActionType.CRAFT_NEW, "Craft satchel")
+    bed_roll = _get_action_with_text(actions, ActionType.CRAFT_NEW, "Craft bed roll")
+    cot = _get_action_with_text(actions, ActionType.CRAFT_NEW, "Craft cot")
+
+    assert satchel is not None
+    assert satchel.selectable is True
+    assert bed_roll is not None
+    assert bed_roll.selectable is False
+    assert cot is not None
+    assert cot.selectable is False
+
+
+def test_crafting_actions_make_bed_roll_selectable_when_hide_and_leaves_are_available() -> None:
+    """Bed roll becomes selectable only when both authored materials are present."""
+
+    ctx = make_ctx("ivette")
+    ctx.vs.modify_inventory(ItemType.PROCESSED_HIDE, 1)
+    ctx.vs.modify_inventory(ItemType.LEAVES, 400)
+
+    bed_roll = _get_action_with_text(
+        crafting_actions(ctx),
+        ActionType.CRAFT_NEW,
+        "Craft bed roll",
+    )
+
+    assert bed_roll is not None
+    assert bed_roll.selectable is True
+
+
+def test_crafting_actions_make_cot_selectable_only_when_all_materials_are_present() -> None:
+    """Cot requires logs, sticks, processed hide, and leaves simultaneously."""
+
+    ctx = make_ctx("ivette")
+    ctx.vs.modify_inventory(ItemType.LOG, 5)
+    ctx.vs.modify_inventory(ItemType.STICK, 25)
+    ctx.vs.modify_inventory(ItemType.PROCESSED_HIDE, 4)
+    ctx.vs.modify_inventory(ItemType.LEAVES, 400)
+
+    cot = _get_action_with_text(crafting_actions(ctx), ActionType.CRAFT_NEW, "Craft cot")
+
+    assert cot is not None
+    assert cot.selectable is True
+
+
+def test_crafting_actions_pool_materials_across_inventory_and_base() -> None:
+    """Crafting material checks use the combined inventory-plus-base total."""
+
+    ctx = make_ctx("ivette")
+    ctx.ws.modify_base_item(ItemType.PROCESSED_HIDE, 1)
+
+    satchel = _get_action_with_text(
+        crafting_actions(ctx),
+        ActionType.CRAFT_NEW,
+        "Craft satchel",
+    )
+
+    assert satchel is not None
+    assert satchel.selectable is True
+
+
+def test_crafting_actions_add_continue_crafting_without_hiding_recipes() -> None:
+    """Continue crafting appears alongside the always-visible recipe entries."""
+
+    ctx = make_ctx("ivette")
+    ctx.vs.set_crafting_state(
+        CraftingProgress(item=CraftableItem.BED_ROLL, minutes_spent=120)
+    )
+
+    actions = crafting_actions(ctx)
+    continue_crafting = _get_action(actions, ActionType.CONTINUE_CRAFTING)
+
+    assert continue_crafting is not None
+    assert continue_crafting.selectable is True
+    assert "60-180" in continue_crafting.prompt_text
+    assert _get_action_with_text(actions, ActionType.CRAFT_NEW, "Craft satchel") is not None
+    assert _get_action_with_text(actions, ActionType.CRAFT_NEW, "Craft bed roll") is not None
+    assert _get_action_with_text(actions, ActionType.CRAFT_NEW, "Craft cot") is not None
+
+
+def test_cooking_actions_returns_empty_for_non_cook() -> None:
+    """Cooking is completely hidden from non-COOK villagers."""
+
+    assert cooking_actions(make_ctx("ivette")) == []
+
+
+def test_cooking_actions_return_empty_without_raw_meat() -> None:
+    """No raw meat means there is nothing to cook even if the fire is lit."""
+
+    ctx = make_ctx("thessia")
+    ctx.ws.add_fire_fuel(FuelType.STICK, 1, current_time=0)
+    ctx.ws.light_fire(current_time=0)
+
+    assert cooking_actions(ctx) == []
+
+
+def test_cooking_actions_show_selectable_cook_meat_with_raw_meat_and_lit_fire() -> None:
+    """Raw meat plus a lit fire produces one selectable cook action."""
+
+    ctx = make_ctx("thessia")
+    ctx.vs.modify_inventory(ItemType.RAW_MEAT, 2)
+    ctx.ws.add_fire_fuel(FuelType.STICK, 30, current_time=0)
+    ctx.ws.light_fire(current_time=0)
+
+    cook_meat = _get_action(cooking_actions(ctx), ActionType.COOK_MEAT)
+
+    assert cook_meat is not None
+    assert cook_meat.selectable is True
+    assert "30 m" in cook_meat.prompt_text
+
+
+def test_cooking_actions_show_non_selectable_cook_meat_when_fire_is_out() -> None:
+    """Cook-meat stays visible but disabled when the fire is out."""
+
+    ctx = make_ctx("thessia")
+    ctx.vs.modify_inventory(ItemType.RAW_MEAT, 2)
+
+    cook_meat = _get_action(cooking_actions(ctx), ActionType.COOK_MEAT)
+
+    assert cook_meat is not None
+    assert cook_meat.selectable is False
+
+
+def test_cooking_actions_show_finish_cooking_instead_of_cook_meat_when_paused_and_relit() -> None:
+    """Paused cooking replaces new cooking once the fire has been relit."""
+
+    ctx = make_ctx("thessia")
+    ctx.vs.modify_inventory(ItemType.RAW_MEAT, 2)
+    ctx.vs.cooking_paused = True
+    ctx.ws.add_fire_fuel(FuelType.STICK, 30, current_time=0)
+    ctx.ws.light_fire(current_time=0)
+
+    actions = cooking_actions(ctx)
+
+    finish_cooking = _get_action(actions, ActionType.FINISH_COOKING)
+    assert finish_cooking is not None
+    assert finish_cooking.selectable is True
+    assert _get_action(actions, ActionType.COOK_MEAT) is None
+
+
+def test_cooking_actions_show_non_selectable_finish_cooking_when_fire_is_still_out() -> None:
+    """Paused cooking remains visible but disabled until the fire is relit."""
+
+    ctx = make_ctx("thessia")
+    ctx.vs.cooking_paused = True
+
+    finish_cooking = _get_action(cooking_actions(ctx), ActionType.FINISH_COOKING)
+
+    assert finish_cooking is not None
+    assert finish_cooking.selectable is False

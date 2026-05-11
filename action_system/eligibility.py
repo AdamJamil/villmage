@@ -12,7 +12,7 @@ from action_system.types import (
     ValidAction,
 )
 from character_canon.types import Profession, VillagerId
-from villmage.game_types import ITEM_WEIGHT_G, ItemType, RestingSpotType
+from villmage.game_types import CraftableItem, ITEM_WEIGHT_G, ItemType, RestingSpotType
 from villmage.world_state import FUEL_BURN_DURATION_MINUTES, item_type_to_fuel_type
 
 
@@ -32,6 +32,26 @@ _ALL_EXPLORATION_RESOURCES: tuple[ExploreResource, ...] = (
     ExploreResource.BOAR,
 )
 
+_CRAFTABLE_OUTPUT_ITEM: dict[CraftableItem, ItemType] = {
+    CraftableItem.SATCHEL: ItemType.SATCHEL,
+    CraftableItem.BED_ROLL: ItemType.BED_ROLL,
+    CraftableItem.COT: ItemType.COT,
+}
+
+_CRAFTING_REQUIREMENTS: dict[CraftableItem, tuple[tuple[ItemType, int], ...]] = {
+    CraftableItem.SATCHEL: ((ItemType.PROCESSED_HIDE, 1),),
+    CraftableItem.BED_ROLL: (
+        (ItemType.PROCESSED_HIDE, 1),
+        (ItemType.LEAVES, 400),
+    ),
+    CraftableItem.COT: (
+        (ItemType.LOG, 5),
+        (ItemType.STICK, 25),
+        (ItemType.PROCESSED_HIDE, 4),
+        (ItemType.LEAVES, 400),
+    ),
+}
+
 
 def _range_spec(argument_name: str, maximum: int) -> str:
     """Return one prompt argument range in the authored `int (1-x)` format."""
@@ -49,6 +69,12 @@ def _resource_name(resource: ExploreResource) -> str:
     """Return one exploration resource as the lower-case prompt-facing label."""
 
     return resource.name.lower()
+
+
+def _craftable_name(craftable_item: CraftableItem) -> str:
+    """Return one craftable item as the lower-case prompt-facing label."""
+
+    return _item_name(_CRAFTABLE_OUTPUT_ITEM[craftable_item])
 
 
 def _total_available_item_count(ctx: ActionContext, item: ItemType) -> int:
@@ -98,6 +124,60 @@ def _villager_profession(ctx: ActionContext) -> Profession:
 
     villager = ctx.canon.get_villager(VillagerId(ctx.villager_id))
     return villager.profession
+
+
+def _missing_material_requirements(
+    ctx: ActionContext,
+    craftable_item: CraftableItem,
+) -> list[str]:
+    """Return authored missing-material descriptions for one crafting recipe."""
+
+    missing_materials: list[str] = []
+    for item, needed_count in _CRAFTING_REQUIREMENTS[craftable_item]:
+        if _total_available_item_count(ctx, item) < needed_count:
+            missing_materials.append(f"{needed_count} {_item_name(item)}")
+    return missing_materials
+
+
+def _hours_text(total_minutes: int) -> str:
+    """Return one authored duration in prompt-facing hour text."""
+
+    if total_minutes % 60 == 0:
+        total_hours = total_minutes // 60
+        unit = "hour" if total_hours == 1 else "hours"
+        return f"{total_hours} {unit}"
+    return f"{total_minutes / 60:.1f} hours"
+
+
+def _craft_recipe_action(
+    ctx: ActionContext,
+    craftable_item: CraftableItem,
+) -> ValidAction:
+    """Return one always-visible crafter recipe action entry."""
+
+    requirements_text = ", ".join(
+        f"{needed_count} {_item_name(item)}"
+        for item, needed_count in _CRAFTING_REQUIREMENTS[craftable_item]
+    )
+    prompt_text = (
+        f"Craft {_craftable_name(craftable_item)} "
+        f"({_hours_text(craftable_item.total_minutes)}; requires {requirements_text})"
+    )
+    missing_materials = _missing_material_requirements(ctx, craftable_item)
+    if len(missing_materials) == 0:
+        return ValidAction(
+            action_type=ActionType.CRAFT_NEW,
+            prompt_text=prompt_text,
+            selectable=True,
+        )
+    return ValidAction(
+        action_type=ActionType.CRAFT_NEW,
+        prompt_text=(
+            f"{prompt_text} "
+            f"(Cannot perform! Missing materials: {', '.join(missing_materials)}.)"
+        ),
+        selectable=False,
+    )
 
 
 def _current_inventory_weight_g(ctx: ActionContext) -> int:
@@ -403,3 +483,71 @@ def misc_actions(ctx: ActionContext) -> list[ValidAction]:
         )
 
     return actions
+
+
+def crafting_actions(ctx: ActionContext) -> list[ValidAction]:
+    """Return crafter recipes and any authored continue-crafting entry."""
+
+    if _villager_profession(ctx) is not Profession.CRAFTER:
+        return []
+
+    actions = [
+        _craft_recipe_action(ctx, craftable_item)
+        for craftable_item in (
+            CraftableItem.SATCHEL,
+            CraftableItem.BED_ROLL,
+            CraftableItem.COT,
+        )
+    ]
+
+    crafting_progress = ctx.vs.crafting_in_progress
+    if crafting_progress is None:
+        return actions
+
+    remaining_minutes = crafting_progress.item.total_minutes - crafting_progress.minutes_spent
+    actions.append(
+        ValidAction(
+            action_type=ActionType.CONTINUE_CRAFTING,
+            prompt_text=(
+                f"Continue crafting {_craftable_name(crafting_progress.item)} "
+                f'{{"minutes_to_spend_now": int (60-{remaining_minutes})}} '
+                f"({remaining_minutes} minutes to completion)"
+            ),
+            selectable=True,
+        )
+    )
+    return actions
+
+
+def cooking_actions(ctx: ActionContext) -> list[ValidAction]:
+    """Return cook-only cooking actions for new or paused cooking work."""
+
+    if _villager_profession(ctx) is not Profession.COOK:
+        return []
+
+    fire_lit = ctx.ws.is_fire_lit()
+    if ctx.vs.cooking_paused:
+        prompt_text = "Finish cooking (30 m)"
+        if not fire_lit:
+            prompt_text += " (Cannot perform! Fire is out.)"
+        return [
+            ValidAction(
+                action_type=ActionType.FINISH_COOKING,
+                prompt_text=prompt_text,
+                selectable=fire_lit,
+            )
+        ]
+
+    if _total_available_item_count(ctx, ItemType.RAW_MEAT) <= 0:
+        return []
+
+    prompt_text = "Cook meat (30 m)"
+    if not fire_lit:
+        prompt_text += " (Cannot perform! Fire is out.)"
+    return [
+        ValidAction(
+            action_type=ActionType.COOK_MEAT,
+            prompt_text=prompt_text,
+            selectable=fire_lit,
+        )
+    ]

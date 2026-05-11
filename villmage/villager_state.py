@@ -265,6 +265,7 @@ class VillagerState:
     inventory: dict[ItemType, int]
     sleep_spot_claim: RestingSpotType | None
     crafting_in_progress: CraftingProgress | None
+    cooking_paused: bool
     current_action: CurrentAction | None
     last_rest_game_time: int | None
     awake_minutes_since_compaction: int
@@ -283,6 +284,7 @@ class VillagerState:
         self.inventory = {}
         self.sleep_spot_claim = None
         self.crafting_in_progress = None
+        self.cooking_paused = False
         self.current_action = None
         self.last_rest_game_time = None
         self.awake_minutes_since_compaction = 0
