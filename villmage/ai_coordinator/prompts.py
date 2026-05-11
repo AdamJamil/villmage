@@ -11,11 +11,17 @@ from llm_client.types import MessageRole, PromptSegment
 from memory_system.types import (
     EventLogEntry,
     MemoryEntry,
-    RelationshipRecord,
+    RelationshipRecord as MemoryRelationshipRecord,
     VillagerId as MemoryVillagerId,
     VillagerMemoryContext,
 )
-from villmage.ai_coordinator.types import PromptPackage
+from villmage.ai_coordinator.types import (
+    ConversationSnapshot,
+    PromptPackage,
+    RelationshipRecord,
+    TradeSnapshot,
+    TradeTurnRecord,
+)
 from villmage.game_types import GameTime, ItemType
 from villmage.villager_state import ComputedStats, HealthSubcomponent, MoodSubcomponent
 from villmage.world_state import BaseSummary
@@ -68,7 +74,7 @@ def _format_own_character(own_canon: VillagerCanon) -> str:
 
 def _format_other_characters(
     other_canons: list[VillagerCanon],
-    relationships: dict[MemoryVillagerId, RelationshipRecord],
+    relationships: dict[MemoryVillagerId, MemoryRelationshipRecord],
 ) -> str:
     """Render other villagers with their paired relationship state."""
 
@@ -250,6 +256,61 @@ def _format_action_list(action_list: ActionList) -> str:
     return "\n\n".join(parts)
 
 
+def _format_conversation_history(snapshot: ConversationSnapshot) -> str:
+    """Render the supplied conversation history without additional filtering."""
+
+    if not snapshot.history:
+        return "Conversation history: None."
+    lines = [turn.text for turn in snapshot.history]
+    return "Conversation history:\n" + "\n".join(lines)
+
+
+def _format_trade_items(items: list[tuple[ItemType, int]]) -> str:
+    """Render one stable trade-item list."""
+
+    if not items:
+        return "None."
+    return "\n".join(f"- {quantity} {item.name}" for item, quantity in items)
+
+
+def _format_trade_turn_record(turn: TradeTurnRecord) -> str:
+    """Render one prior trade turn in readable chronological form."""
+
+    item_text = (
+        ", ".join(f"{item.quantity} {item.item.name}" for item in turn.items)
+        if turn.items
+        else "no items"
+    )
+    speech_text = f' | speech: "{turn.speech}"' if turn.speech is not None else ""
+    return (
+        f"- {turn.villager_id}: {turn.action.name} | items: {item_text}{speech_text}"
+    )
+
+
+def _format_trade_history(snapshot: TradeSnapshot) -> str:
+    """Render the trade negotiation history supplied by the caller."""
+
+    if not snapshot.history:
+        return "Trade history: None."
+    lines = [_format_trade_turn_record(turn) for turn in snapshot.history]
+    return "Trade history:\n" + "\n".join(lines)
+
+
+def _format_relationship_record(relationship: RelationshipRecord) -> str:
+    """Render one directional relationship record for prompt context."""
+
+    impressions = (
+        "\n".join(f"- {impression}" for impression in relationship.impressions)
+        if relationship.impressions
+        else "- None."
+    )
+    return (
+        f"Current relationship description: {relationship.description}\n"
+        "Recent impressions:\n"
+        f"{impressions}"
+    )
+
+
 def assemble_action_selection(
     own_canon: VillagerCanon,
     other_canons: list[VillagerCanon],
@@ -281,3 +342,151 @@ def assemble_action_selection(
         _make_segment(MessageRole.USER, f"Timestamp: {game_time}"),
     ]
     return PromptPackage(segments=segments, breakpoints=[3, 4])
+
+
+def assemble_conversation_turn(
+    own_canon: VillagerCanon,
+    other_canons: list[VillagerCanon],
+    memory_context: VillagerMemoryContext,
+    computed_stats: ComputedStats,
+    inventory_items: list[tuple[ItemType, int]],
+    snapshot: ConversationSnapshot,
+    game_time: GameTime,
+) -> PromptPackage:
+    """Render a conversation-turn prompt with live state and provided history."""
+
+    segments = [
+        _make_segment(MessageRole.SYSTEM, _SYSTEM_PROMPT),
+        _make_segment(MessageRole.USER, _BACKSTORY_TEXT),
+        _make_segment(MessageRole.USER, _format_own_character(own_canon)),
+        _make_segment(
+            MessageRole.USER,
+            _format_other_characters(other_canons, memory_context.relationships),
+        ),
+        _make_segment(MessageRole.USER, _format_memories(memory_context)),
+        _make_segment(
+            MessageRole.USER,
+            _format_villager_state(inventory_items, computed_stats),
+        ),
+        _make_segment(MessageRole.USER, _format_conversation_history(snapshot)),
+        _make_segment(
+            MessageRole.USER,
+            (
+                "Decide what to say or do on this conversation turn. You may reference "
+                "your current condition and inventory if relevant."
+            ),
+        ),
+        _make_segment(MessageRole.USER, _THOUGHTS_INSTRUCTION),
+        _make_segment(MessageRole.USER, f"Timestamp: {game_time}"),
+    ]
+    return PromptPackage(segments=segments, breakpoints=[3, 4])
+
+
+def assemble_trade_turn(
+    own_canon: VillagerCanon,
+    inventory_items: list[tuple[ItemType, int]],
+    snapshot: TradeSnapshot,
+) -> PromptPackage:
+    """Render a trade-turn prompt showing own inventory and negotiation history."""
+
+    segments = [
+        _make_segment(MessageRole.SYSTEM, _SYSTEM_PROMPT),
+        _make_segment(MessageRole.USER, _format_own_character(own_canon)),
+        _make_segment(
+            MessageRole.USER,
+            f"Your inventory:\n{_format_trade_items(inventory_items)}",
+        ),
+        _make_segment(
+            MessageRole.USER,
+            f"Trading with: {snapshot.other_villager_id}\n{_format_trade_history(snapshot)}",
+        ),
+        _make_segment(
+            MessageRole.USER,
+            "Decide the next trade action based on the negotiation so far.",
+        ),
+    ]
+    return PromptPackage(segments=segments, breakpoints=[])
+
+
+def assemble_join_decision(
+    own_canon: VillagerCanon,
+    current_action_description: str,
+    snapshot: ConversationSnapshot,
+) -> PromptPackage:
+    """Render a join-decision prompt using the provided history verbatim."""
+
+    segments = [
+        _make_segment(MessageRole.SYSTEM, _SYSTEM_PROMPT),
+        _make_segment(MessageRole.USER, _format_own_character(own_canon)),
+        _make_segment(
+            MessageRole.USER,
+            f"Current action: {current_action_description}",
+        ),
+        _make_segment(MessageRole.USER, _format_conversation_history(snapshot)),
+        _make_segment(
+            MessageRole.USER,
+            "Should you join this conversation right now? Answer for your character.",
+        ),
+    ]
+    return PromptPackage(segments=segments, breakpoints=[])
+
+
+def assemble_social_score(
+    own_canon: VillagerCanon,
+    snapshot: ConversationSnapshot,
+) -> PromptPackage:
+    """Render a minimal social-score prompt asking for a 0-10 value."""
+
+    segments = [
+        _make_segment(MessageRole.SYSTEM, _SYSTEM_PROMPT),
+        _make_segment(MessageRole.USER, _format_own_character(own_canon)),
+        _make_segment(MessageRole.USER, _format_conversation_history(snapshot)),
+        _make_segment(
+            MessageRole.USER,
+            "Rate how socially satisfying this conversation was for you on a 0-10 val.",
+        ),
+    ]
+    return PromptPackage(segments=segments, breakpoints=[])
+
+
+def assemble_relationship_update(
+    speaker_canon: VillagerCanon,
+    subject_canon: VillagerCanon,
+    relationship: RelationshipRecord,
+    snapshot: ConversationSnapshot,
+) -> PromptPackage:
+    """Render a directional relationship-update prompt for one ordered pair."""
+
+    segments = [
+        _make_segment(MessageRole.SYSTEM, _SYSTEM_PROMPT),
+        _make_segment(
+            MessageRole.USER,
+            (
+                f"You are {speaker_canon.name}. Update your view of {subject_canon.name} "
+                "based on this conversation."
+            ),
+        ),
+        _make_segment(
+            MessageRole.USER,
+            f"Speaker profile:\n{_format_own_character(speaker_canon)}",
+        ),
+        _make_segment(
+            MessageRole.USER,
+            (
+                f"Subject: {subject_canon.name}\n"
+                f"Bio: {subject_canon.bio}\n"
+                f"Personality: {subject_canon.personality}\n"
+                f"Desires: {subject_canon.desires}"
+            ),
+        ),
+        _make_segment(MessageRole.USER, _format_relationship_record(relationship)),
+        _make_segment(MessageRole.USER, _format_conversation_history(snapshot)),
+        _make_segment(
+            MessageRole.USER,
+            (
+                f"From {speaker_canon.name}'s perspective, record one new impression of "
+                f"{subject_canon.name} and update the description only if it changed."
+            ),
+        ),
+    ]
+    return PromptPackage(segments=segments, breakpoints=[])
