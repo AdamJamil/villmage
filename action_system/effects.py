@@ -5,10 +5,33 @@
 from __future__ import annotations
 
 from action_system.eligibility import CRAFTING_REQUIREMENTS
-from action_system.types import ActionContext, ActionType, SelectedAction
-from villmage.game_types import CraftableItem, ItemType, RestingSpotType
+from action_system import timing
+from action_system.types import (
+    ActionContext,
+    ActionType,
+    ExploreResource,
+    SelectedAction,
+)
+from character_canon.types import VillagerId
+from villmage.game_types import CraftableItem, ITEM_WEIGHT_G, ItemType, RestingSpotType
 from villmage.villager_state import CraftingProgress
 from villmage.world_state import DirtinessSource, item_type_to_fuel_type
+
+_EXPLORATION_ITEM_BY_RESOURCE: dict[ExploreResource, ItemType] = {
+    ExploreResource.PEACHES: ItemType.PEACH,
+    ExploreResource.STICKS: ItemType.STICK,
+    ExploreResource.LEAVES: ItemType.LEAVES,
+    ExploreResource.LOGS: ItemType.LOG,
+    ExploreResource.BOAR: ItemType.CARCASS,
+}
+
+_EXPLORATION_CALORIES_PER_HOUR: dict[ExploreResource, float] = {
+    ExploreResource.PEACHES: 50.0,
+    ExploreResource.STICKS: 50.0,
+    ExploreResource.LEAVES: 50.0,
+    ExploreResource.LOGS: 100.0,
+    ExploreResource.BOAR: 100.0,
+}
 
 
 def _require_quantity(action: SelectedAction) -> int:
@@ -45,6 +68,24 @@ def _require_liters(action: SelectedAction) -> int:
     if liters is None:
         raise ValueError(f"Action {action.action_type!r} requires liters.")
     return liters
+
+
+def _require_resource(action: SelectedAction) -> ExploreResource:
+    """Return the selected exploration resource, rejecting malformed actions."""
+
+    resource = action.resource
+    if resource is None:
+        raise ValueError(f"Action {action.action_type!r} requires resource.")
+    return resource
+
+
+def _require_duration_minutes(action: SelectedAction) -> int:
+    """Return the selected duration in minutes, rejecting malformed actions."""
+
+    duration_minutes = action.duration_minutes
+    if duration_minutes is None:
+        raise ValueError(f"Action {action.action_type!r} requires duration_minutes.")
+    return duration_minutes
 
 
 def _deduct_inventory_then_base(
@@ -141,6 +182,51 @@ def _complete_drink_water(action: SelectedAction, ctx: ActionContext) -> None:
     )
 
 
+def _remaining_capacity_kg(ctx: ActionContext) -> float:
+    """Return current unused carrying capacity in kilograms."""
+
+    total_inventory_weight_g = sum(
+        ITEM_WEIGHT_G[item] * quantity for item, quantity in ctx.vs.inventory.items()
+    )
+    has_satchel = ctx.vs.inventory.get(ItemType.SATCHEL, 0) >= 1
+    carry_capacity_g = 40_000 + (30_000 if has_satchel else 0)
+    return (carry_capacity_g - total_inventory_weight_g) / 1000.0
+
+
+def _complete_explore(
+    action: SelectedAction,
+    ctx: ActionContext,
+    current_time: int,
+) -> None:
+    """Sample exploration yield, add found items, and charge authored calories."""
+
+    resource = _require_resource(action)
+    duration_minutes = _require_duration_minutes(action)
+    villager = ctx.canon.get_villager(VillagerId(ctx.villager_id))
+    item_type = _EXPLORATION_ITEM_BY_RESOURCE[resource]
+    item_weight_kg = ITEM_WEIGHT_G[item_type] / 1000.0
+    items_found = timing.sample_exploration_yield(
+        effective_mean_minutes=timing.exploration_effective_mean(
+            resource=resource,
+            profession=villager.profession,
+            yield_scale=ctx.multipliers.exploration_yield_scale,
+        ),
+        work_speed=timing.work_speed_modifier(ctx.vs._compute_health()),
+        duration_minutes=duration_minutes,
+        item_weight_kg=item_weight_kg,
+        remaining_capacity_kg=_remaining_capacity_kg(ctx),
+    )
+    if items_found > 0:
+        ctx.vs.modify_inventory(item_type, items_found)
+        if resource is ExploreResource.BOAR:
+            for _ in range(items_found):
+                ctx.ws.add_carcass(current_time)
+    ctx.vs.modify_stat(
+        "satiation",
+        -_EXPLORATION_CALORIES_PER_HOUR[resource] * (duration_minutes / 60.0),
+    )
+
+
 def _complete_rest(action: SelectedAction, ctx: ActionContext) -> None:
     """Leave rest completion to Simulation Engine's timestamp handling."""
 
@@ -188,10 +274,16 @@ def apply_start_effect(action: SelectedAction, ctx: ActionContext) -> None:
             return
 
 
-def apply_completion_effect(action: SelectedAction, ctx: ActionContext) -> None:
+def apply_completion_effect(
+    action: SelectedAction,
+    ctx: ActionContext,
+    current_time: int,
+) -> None:
     """Dispatch end-of-action effects for the currently implemented action types."""
 
     match action.action_type:
+        case ActionType.EXPLORE:
+            _complete_explore(action, ctx, current_time)
         case ActionType.EAT_PEACH:
             _complete_eat_peach(action, ctx)
         case ActionType.EAT_COOKED_MEAT:

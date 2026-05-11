@@ -8,8 +8,15 @@ from copy import deepcopy
 
 import pytest
 
+import action_system.effects as effects_module
 from action_system.effects import apply_completion_effect, apply_start_effect
-from action_system.types import ActionContext, ActionType, AutobalanceMultipliers, SelectedAction
+from action_system.types import (
+    ActionContext,
+    ActionType,
+    AutobalanceMultipliers,
+    ExploreResource,
+    SelectedAction,
+)
 from character_canon.canon import CharacterCanon
 from villmage.game_types import CraftableItem, ItemType, RestingSpotType
 from villmage.villager_state import CraftingProgress, VillagerState
@@ -237,7 +244,7 @@ def test_eat_peach_restores_satiation() -> None:
     ctx.vs.modify_stat("satiation", -1800)
     ctx.vs.modify_inventory(ItemType.PEACH, 2)
 
-    apply_completion_effect(make_action(ActionType.EAT_PEACH, quantity=2), ctx)
+    apply_completion_effect(make_action(ActionType.EAT_PEACH, quantity=2), ctx, 0)
 
     assert ctx.vs.satiation == 120.0
     assert ctx.vs.inventory[ItemType.PEACH] == 0
@@ -252,7 +259,7 @@ def test_eat_peach_uses_autobalance_scale() -> None:
     ctx.vs.modify_stat("satiation", -1800)
     ctx.vs.modify_inventory(ItemType.PEACH, 1)
 
-    apply_completion_effect(make_action(ActionType.EAT_PEACH, quantity=1), ctx)
+    apply_completion_effect(make_action(ActionType.EAT_PEACH, quantity=1), ctx, 0)
 
     assert ctx.vs.satiation == 120.0
 
@@ -264,7 +271,7 @@ def test_eat_peach_caps_satiation() -> None:
     ctx.vs.modify_stat("satiation", -100)
     ctx.vs.modify_inventory(ItemType.PEACH, 5)
 
-    apply_completion_effect(make_action(ActionType.EAT_PEACH, quantity=5), ctx)
+    apply_completion_effect(make_action(ActionType.EAT_PEACH, quantity=5), ctx, 0)
 
     assert ctx.vs.satiation == 1800.0
 
@@ -279,6 +286,7 @@ def test_eat_cooked_meat_restores_satiation() -> None:
     apply_completion_effect(
         make_action(ActionType.EAT_COOKED_MEAT, quantity=1),
         ctx,
+        0,
     )
 
     assert ctx.vs.satiation == 800.0
@@ -293,6 +301,7 @@ def test_eat_cooked_meat_adds_dirtiness() -> None:
     apply_completion_effect(
         make_action(ActionType.EAT_COOKED_MEAT, quantity=2),
         ctx,
+        0,
     )
 
     assert ctx.ws.get_total_dirtiness() == 10
@@ -305,7 +314,7 @@ def test_drink_water_restores_hydration_and_consumes_supply() -> None:
     ctx.vs.modify_stat("hydration", -6000)
     ctx.ws.modify_water(2000)
 
-    apply_completion_effect(make_action(ActionType.DRINK_WATER, liters=2), ctx)
+    apply_completion_effect(make_action(ActionType.DRINK_WATER, liters=2), ctx, 0)
 
     assert ctx.vs.hydration == 2000.0
     assert ctx.ws.water_supply_ml == 0
@@ -320,7 +329,7 @@ def test_drink_water_uses_autobalance_scale() -> None:
     ctx.vs.modify_stat("hydration", -6000)
     ctx.ws.modify_water(1000)
 
-    apply_completion_effect(make_action(ActionType.DRINK_WATER, liters=1), ctx)
+    apply_completion_effect(make_action(ActionType.DRINK_WATER, liters=1), ctx, 0)
 
     assert ctx.vs.hydration == 1500.0
 
@@ -332,7 +341,7 @@ def test_drink_water_caps_hydration_but_still_spends_water() -> None:
     ctx.vs.modify_stat("hydration", -500)
     ctx.ws.modify_water(2000)
 
-    apply_completion_effect(make_action(ActionType.DRINK_WATER, liters=2), ctx)
+    apply_completion_effect(make_action(ActionType.DRINK_WATER, liters=2), ctx, 0)
 
     assert ctx.vs.hydration == 6000.0
     assert ctx.ws.water_supply_ml == 0
@@ -362,7 +371,7 @@ def test_go_to_sleep_uses_authored_modifier_table(
         ctx.ws.add_fire_fuel(FuelType.STICK, 1, current_time=0)
         ctx.ws.light_fire(current_time=0)
 
-    apply_completion_effect(make_action(ActionType.GO_TO_SLEEP, hours=7), ctx)
+    apply_completion_effect(make_action(ActionType.GO_TO_SLEEP, hours=7), ctx, 0)
 
     assert ctx.vs.wakefulness == pytest.approx(51.0 * expected_modifier)
 
@@ -374,7 +383,7 @@ def test_go_to_sleep_caps_wakefulness() -> None:
     ctx.vs.modify_stat("wakefulness", -10)
     ctx.vs.set_sleep_spot(RestingSpotType.COT)
 
-    apply_completion_effect(make_action(ActionType.GO_TO_SLEEP, hours=12), ctx)
+    apply_completion_effect(make_action(ActionType.GO_TO_SLEEP, hours=12), ctx, 0)
 
     assert ctx.vs.wakefulness == 100.0
 
@@ -385,7 +394,7 @@ def test_place_bed_roll_deducts_inventory_and_claims_spot() -> None:
     ctx = make_ctx("aldric")
     ctx.vs.modify_inventory(ItemType.BED_ROLL, 1)
 
-    apply_completion_effect(make_action(ActionType.PLACE_BED_ROLL), ctx)
+    apply_completion_effect(make_action(ActionType.PLACE_BED_ROLL), ctx, 0)
 
     assert ctx.vs.inventory[ItemType.BED_ROLL] == 0
     assert ctx.ws.placed_resting_spots["aldric"] is RestingSpotType.BED_ROLL
@@ -398,7 +407,7 @@ def test_place_cot_deducts_inventory_and_claims_spot() -> None:
     ctx = make_ctx("aldric")
     ctx.vs.modify_inventory(ItemType.COT, 1)
 
-    apply_completion_effect(make_action(ActionType.PLACE_COT), ctx)
+    apply_completion_effect(make_action(ActionType.PLACE_COT), ctx, 0)
 
     assert ctx.vs.inventory[ItemType.COT] == 0
     assert ctx.ws.placed_resting_spots["aldric"] is RestingSpotType.COT
@@ -412,7 +421,7 @@ def test_wash_up_resets_cleanliness_and_consumes_water() -> None:
     ctx.vs.modify_stat("cleanliness", -80)
     ctx.ws.modify_water(500)
 
-    apply_completion_effect(make_action(ActionType.WASH_UP), ctx)
+    apply_completion_effect(make_action(ActionType.WASH_UP), ctx, 0)
 
     assert ctx.vs.cleanliness == 100.0
     assert ctx.ws.water_supply_ml == 0
@@ -425,7 +434,227 @@ def test_rest_completion_is_a_no_op() -> None:
     before_vs = deepcopy(ctx.vs)
     before_ws = deepcopy(ctx.ws)
 
-    apply_completion_effect(make_action(ActionType.REST), ctx)
+    apply_completion_effect(make_action(ActionType.REST), ctx, 0)
 
     assert ctx.vs.__dict__ == before_vs.__dict__
     assert ctx.ws.__dict__ == before_ws.__dict__
+
+
+@pytest.mark.parametrize(
+    ("resource", "expected_item", "yield_count"),
+    (
+        (ExploreResource.PEACHES, ItemType.PEACH, 5),
+        (ExploreResource.STICKS, ItemType.STICK, 10),
+        (ExploreResource.LEAVES, ItemType.LEAVES, 20),
+        (ExploreResource.LOGS, ItemType.LOG, 2),
+    ),
+)
+def test_explore_adds_yielded_items_to_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    resource: ExploreResource,
+    expected_item: ItemType,
+    yield_count: int,
+) -> None:
+    """Exploration should add the sampled yield of the authored item type."""
+
+    ctx = make_ctx()
+    monkeypatch.setattr(
+        effects_module.timing,
+        "sample_exploration_yield",
+        lambda **_: yield_count,
+    )
+
+    apply_completion_effect(
+        make_action(
+            ActionType.EXPLORE,
+            resource=resource,
+            duration_minutes=60,
+        ),
+        ctx,
+        0,
+    )
+
+    assert ctx.vs.inventory[expected_item] == yield_count
+
+
+def test_explore_boar_adds_carcass_inventory_and_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boar exploration should add carcasses to both inventory and rot tracking."""
+
+    ctx = make_ctx("sewalt")
+    monkeypatch.setattr(
+        effects_module.timing,
+        "sample_exploration_yield",
+        lambda **_: 1,
+    )
+
+    apply_completion_effect(
+        make_action(
+            ActionType.EXPLORE,
+            resource=ExploreResource.BOAR,
+            duration_minutes=60,
+        ),
+        ctx,
+        500,
+    )
+
+    assert ctx.vs.inventory[ItemType.CARCASS] == 1
+    assert len(ctx.ws.live_carcasses) == 1
+    assert ctx.ws.live_carcasses[0].arrival_timestamp == 500
+
+
+def test_explore_boar_with_zero_yield_does_not_add_carcass_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero boar yield should not register any carcass rot trackers."""
+
+    ctx = make_ctx("sewalt")
+    monkeypatch.setattr(
+        effects_module.timing,
+        "sample_exploration_yield",
+        lambda **_: 0,
+    )
+
+    apply_completion_effect(
+        make_action(
+            ActionType.EXPLORE,
+            resource=ExploreResource.BOAR,
+            duration_minutes=60,
+        ),
+        ctx,
+        500,
+    )
+
+    assert ctx.ws.live_carcasses == []
+
+
+def test_explore_light_resource_charges_authored_calories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Peach exploration should charge 50 calories per hour."""
+
+    ctx = make_ctx()
+    ctx.vs.satiation = 1800.0
+    monkeypatch.setattr(
+        effects_module.timing,
+        "sample_exploration_yield",
+        lambda **_: 0,
+    )
+
+    apply_completion_effect(
+        make_action(
+            ActionType.EXPLORE,
+            resource=ExploreResource.PEACHES,
+            duration_minutes=120,
+        ),
+        ctx,
+        0,
+    )
+
+    assert ctx.vs.satiation == 1700.0
+
+
+def test_explore_heavy_resource_charges_authored_calories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boar exploration should charge 100 calories per hour."""
+
+    ctx = make_ctx("sewalt")
+    monkeypatch.setattr(
+        effects_module.timing,
+        "sample_exploration_yield",
+        lambda **_: 0,
+    )
+
+    apply_completion_effect(
+        make_action(
+            ActionType.EXPLORE,
+            resource=ExploreResource.BOAR,
+            duration_minutes=60,
+        ),
+        ctx,
+        0,
+    )
+
+    assert ctx.vs.satiation == 1700.0
+
+
+def test_explore_calorie_charge_floors_at_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exploration calorie charges should clamp satiation at zero."""
+
+    ctx = make_ctx("aldric")
+    ctx.vs.satiation = 10.0
+    monkeypatch.setattr(
+        effects_module.timing,
+        "sample_exploration_yield",
+        lambda **_: 0,
+    )
+
+    apply_completion_effect(
+        make_action(
+            ActionType.EXPLORE,
+            resource=ExploreResource.LOGS,
+            duration_minutes=1200,
+        ),
+        ctx,
+        0,
+    )
+
+    assert ctx.vs.satiation == 0.0
+
+
+@pytest.mark.parametrize(
+    ("villager_id", "resource", "expected_weight_kg"),
+    (
+        ("maren", ExploreResource.PEACHES, 0.15),
+        ("harren", ExploreResource.STICKS, 0.5),
+        ("ivette", ExploreResource.LEAVES, 0.005),
+        ("aldric", ExploreResource.LOGS, 18.0),
+        ("sewalt", ExploreResource.BOAR, 30.0),
+    ),
+)
+def test_explore_passes_correct_item_weight_to_sampler(
+    monkeypatch: pytest.MonkeyPatch,
+    villager_id: str,
+    resource: ExploreResource,
+    expected_weight_kg: float,
+) -> None:
+    """Exploration should pass the authored item weight in kilograms to the sampler."""
+
+    captured: dict[str, float] = {}
+
+    def _capture_sampler(
+        *,
+        effective_mean_minutes: float,
+        work_speed: float,
+        duration_minutes: int,
+        item_weight_kg: float,
+        remaining_capacity_kg: float,
+    ) -> int:
+        """Record sampler inputs for assertion and return a deterministic zero yield."""
+
+        del effective_mean_minutes, work_speed, duration_minutes, remaining_capacity_kg
+        captured["item_weight_kg"] = item_weight_kg
+        return 0
+
+    ctx = make_ctx(villager_id)
+    monkeypatch.setattr(
+        effects_module.timing,
+        "sample_exploration_yield",
+        _capture_sampler,
+    )
+
+    apply_completion_effect(
+        make_action(
+            ActionType.EXPLORE,
+            resource=resource,
+            duration_minutes=60,
+        ),
+        ctx,
+        0,
+    )
+
+    assert captured["item_weight_kg"] == expected_weight_kg
