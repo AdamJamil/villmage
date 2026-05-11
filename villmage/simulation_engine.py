@@ -55,6 +55,13 @@ class _ActionSystemProtocol(Protocol):
     """Marker protocol for the action-system API reference owned by the engine."""
 
 
+class _SleepAdjustingActionSystemProtocol(Protocol):
+    """Action-system surface needed for fire-state sleep adjustments."""
+
+    def adjust_active_sleep(self, villager_id: VillagerId) -> None:
+        """Split one active sleep segment under the current fire modifier."""
+
+
 class CrossingType(Enum):
     """Threshold categories emitted by engine-level decay handling."""
 
@@ -326,6 +333,22 @@ class SimulationEngine:
                     sequence=-1,
                 )
             )
+
+    def _handle_fire_extinction(self) -> None:
+        """Mark the fire out and resplit every living villager's active sleep."""
+
+        self.world_state.mark_fire_extinguished()
+        action_system = cast(
+            _SleepAdjustingActionSystemProtocol,
+            self.action_system,
+        )
+        for villager_id, villager_state in self.villager_states.items():
+            current_action = villager_state.current_action
+            if (
+                current_action is not None
+                and current_action.category is ActionCategory.SLEEPING
+            ):
+                action_system.adjust_active_sleep(villager_id)
 
     @staticmethod
     def _inventory_edible_calories(villager_state: VillagerState) -> int:
