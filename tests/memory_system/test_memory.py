@@ -4,13 +4,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from typing import Coroutine
+from unittest.mock import AsyncMock
 
+import pytest
 from llm_client.client import LLMClient
-from llm_client.types import LLMConfig
+from llm_client.types import CallType, LLMConfig, LLMResponse, MessageRole, PromptSegment
 from memory_system.memory import MemorySystem
 from memory_system.types import (
+    CompactionReason,
     EventLogEntry,
     EventType,
     MemoryEntry,
@@ -49,6 +54,12 @@ def _relationship_record(
     """Return one directed relationship record from the memory system."""
 
     return memory_system._relationships[speaker_id][subject_id]
+
+
+def _run_async(coroutine: Coroutine[object, object, object]) -> object:
+    """Run one async test coroutine to completion."""
+
+    return asyncio.run(coroutine)
 
 
 def _six_villager_ids() -> list[VillagerId]:
@@ -611,3 +622,421 @@ def test_get_memory_context_all_memory_tiers_initially_empty(tmp_path: Path) -> 
     assert context.long_term_memories == []
     assert context.medium_term_memories == []
     assert context.short_term_memories == []
+
+
+def test_trigger_short_term_compaction_skips_empty_log(tmp_path: Path) -> None:
+    """An empty active log short-circuits without calling the LLM or adding memory."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    complete_mock = AsyncMock()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", complete_mock)
+    try:
+        _run_async(
+            memory_system.trigger_short_term_compaction(
+                aldric,
+                game_time=100,
+                reason=CompactionReason.SLEEP,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+
+    complete_mock.assert_not_called()
+    assert memory_system._short_term_memories[aldric] == []
+
+
+def test_trigger_short_term_compaction_calls_llm_for_non_empty_log(
+    tmp_path: Path,
+) -> None:
+    """A non-empty active log triggers exactly one memory-compaction LLM call."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system.append_event(
+        aldric,
+        EventLogEntry(game_time=1, type=EventType.ACTION, text="Gathered wood."),
+    )
+    memory_system.append_event(
+        aldric,
+        EventLogEntry(game_time=2, type=EventType.CONVO_TURN, text="Spoke to Sewalt."),
+    )
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return a fixed compaction response while asserting the call type."""
+
+        del segments
+        assert call_type is CallType.MEMORY_COMPACTION
+        return LLMResponse(text="summary", input_tokens=10, output_tokens=4)
+
+    complete_mock = AsyncMock(side_effect=fake_complete)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", complete_mock)
+    try:
+        _run_async(
+            memory_system.trigger_short_term_compaction(
+                aldric,
+                game_time=100,
+                reason=CompactionReason.SLEEP,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+
+    complete_mock.assert_awaited_once()
+    assert complete_mock.await_args.args[1] is CallType.MEMORY_COMPACTION
+
+
+def test_trigger_short_term_compaction_prompt_contains_log_content(
+    tmp_path: Path,
+) -> None:
+    """The compaction prompt embeds the active log entries verbatim."""
+
+    aldric = VillagerId("aldric")
+    first_text = "Gathered wood."
+    second_text = "Spoke to Sewalt."
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system.append_event(
+        aldric,
+        EventLogEntry(game_time=1, type=EventType.ACTION, text=first_text),
+    )
+    memory_system.append_event(
+        aldric,
+        EventLogEntry(game_time=2, type=EventType.CONVO_TURN, text=second_text),
+    )
+    captured_segments: list[PromptSegment] = []
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Capture prompt segments and return a fixed response."""
+
+        del call_type
+        captured_segments.extend(segments)
+        return LLMResponse(text="summary", input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(
+            memory_system.trigger_short_term_compaction(
+                aldric,
+                game_time=100,
+                reason=CompactionReason.SLEEP,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert captured_segments == [
+        PromptSegment(
+            role=MessageRole.USER,
+            text=(
+                "Here is a log of everything you experienced recently: "
+                '{"game_time": 1, "type": 1, "text": "Gathered wood."}\n'
+                '{"game_time": 2, "type": 3, "text": "Spoke to Sewalt."}. '
+                "In 128 tokens (~90 words), form an EXTREMELY CONCISE summary "
+                "of the salient memories you experienced. This will be recorded "
+                "in the future and the rest will be thrown out. Prioritize "
+                "information you will use to inform later actions or opinions on "
+                "others. Prioritize information density and accuracy."
+            ),
+        )
+    ]
+    assert first_text in captured_segments[0].text
+    assert second_text in captured_segments[0].text
+
+
+def test_trigger_short_term_compaction_stores_memory_entry_with_supplied_game_time(
+    tmp_path: Path,
+) -> None:
+    """The produced memory entry uses the compaction call's game_time."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system.append_event(
+        aldric,
+        EventLogEntry(game_time=9, type=EventType.ACTION, text="Gathered wood."),
+    )
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return a fixed memory summary."""
+
+        del segments, call_type
+        return LLMResponse(
+            text="Gathered wood, spoke to Sewalt.",
+            input_tokens=10,
+            output_tokens=4,
+        )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(
+            memory_system.trigger_short_term_compaction(
+                aldric,
+                game_time=720,
+                reason=CompactionReason.SLEEP,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert memory_system._short_term_memories[aldric][-1].game_time == 720
+
+
+def test_trigger_short_term_compaction_stores_raw_llm_response_text(
+    tmp_path: Path,
+) -> None:
+    """The produced memory entry preserves the LLM response text verbatim."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system.append_event(
+        aldric,
+        EventLogEntry(game_time=9, type=EventType.ACTION, text="Gathered wood."),
+    )
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return the expected raw summary text."""
+
+        del segments, call_type
+        return LLMResponse(
+            text="Gathered wood, spoke to Sewalt.",
+            input_tokens=10,
+            output_tokens=4,
+        )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(
+            memory_system.trigger_short_term_compaction(
+                aldric,
+                game_time=720,
+                reason=CompactionReason.SLEEP,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert (
+        memory_system._short_term_memories[aldric][-1].text
+        == "Gathered wood, spoke to Sewalt."
+    )
+
+
+def test_trigger_short_term_compaction_clears_active_context_log(
+    tmp_path: Path,
+) -> None:
+    """Successful compaction empties the villager's active context log."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system.append_event(
+        aldric,
+        EventLogEntry(game_time=1, type=EventType.ACTION, text="Gathered wood."),
+    )
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return a fixed compaction response."""
+
+        del segments, call_type
+        return LLMResponse(text="summary", input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(
+            memory_system.trigger_short_term_compaction(
+                aldric,
+                game_time=100,
+                reason=CompactionReason.SLEEP,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert memory_system._active_context_log[aldric] == []
+
+
+def test_trigger_short_term_compaction_subsequent_events_accumulate_in_cleared_log(
+    tmp_path: Path,
+) -> None:
+    """New events still append normally after compaction clears the active log."""
+
+    aldric = VillagerId("aldric")
+    first = EventLogEntry(game_time=1, type=EventType.ACTION, text="Gathered wood.")
+    second = EventLogEntry(game_time=2, type=EventType.THOUGHT, text="Need more wood.")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system.append_event(aldric, first)
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return a fixed compaction response."""
+
+        del segments, call_type
+        return LLMResponse(text="summary", input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(
+            memory_system.trigger_short_term_compaction(
+                aldric,
+                game_time=100,
+                reason=CompactionReason.SLEEP,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+
+    memory_system.append_event(aldric, second)
+
+    assert memory_system._active_context_log[aldric] == [second]
+
+
+def test_trigger_short_term_compaction_multiple_sequential_runs_append_in_order(
+    tmp_path: Path,
+) -> None:
+    """Each successful compaction appends one short-term memory in insertion order."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    responses = ["summary one", "summary two", "summary three"]
+    response_index = 0
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return the next canned summary in sequence."""
+
+        nonlocal response_index
+        del segments, call_type
+        text = responses[response_index]
+        response_index += 1
+        return LLMResponse(text=text, input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        for game_time, event_text in enumerate(
+            ["first event", "second event", "third event"],
+            start=10,
+        ):
+            memory_system.append_event(
+                aldric,
+                EventLogEntry(
+                    game_time=game_time,
+                    type=EventType.ACTION,
+                    text=event_text,
+                ),
+            )
+            _run_async(
+                memory_system.trigger_short_term_compaction(
+                    aldric,
+                    game_time=game_time + 100,
+                    reason=CompactionReason.SLEEP,
+                )
+            )
+    finally:
+        monkeypatch.undo()
+
+    assert [entry.text for entry in memory_system._short_term_memories[aldric]] == responses
+
+
+def test_trigger_short_term_compaction_preserves_other_villagers_state(
+    tmp_path: Path,
+) -> None:
+    """Compacting one villager does not touch another villager's logs or memories."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    aldric_entry = EventLogEntry(game_time=1, type=EventType.ACTION, text="Gathered wood.")
+    maren_entry = EventLogEntry(game_time=2, type=EventType.THOUGHT, text="Need more bread.")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+    memory_system.append_event(aldric, aldric_entry)
+    memory_system.append_event(maren, maren_entry)
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return a fixed compaction response."""
+
+        del segments, call_type
+        return LLMResponse(text="summary", input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(
+            memory_system.trigger_short_term_compaction(
+                aldric,
+                game_time=100,
+                reason=CompactionReason.SLEEP,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert memory_system._active_context_log[maren] == [maren_entry]
+    assert memory_system._short_term_memories[maren] == []
+
+
+def test_trigger_short_term_compaction_reason_has_no_behavioral_effect(
+    tmp_path: Path,
+) -> None:
+    """Changing CompactionReason does not alter the produced LLM call shape."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    captured_calls: list[tuple[list[PromptSegment], CallType]] = []
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Capture each call and return a fixed response."""
+
+        captured_calls.append((list(segments), call_type))
+        return LLMResponse(text="summary", input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        for reason in [CompactionReason.SLEEP, CompactionReason.AWAKE_THRESHOLD]:
+            memory_system.append_event(
+                aldric,
+                EventLogEntry(game_time=1, type=EventType.ACTION, text="Gathered wood."),
+            )
+            _run_async(
+                memory_system.trigger_short_term_compaction(
+                    aldric,
+                    game_time=100,
+                    reason=reason,
+                )
+            )
+    finally:
+        monkeypatch.undo()
+
+    assert len(memory_system._short_term_memories[aldric]) == 2
+    assert len(captured_calls) == 2
+    assert captured_calls[0] == captured_calls[1]

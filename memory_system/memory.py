@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import TextIO
 
 from llm_client.client import LLMClient
+from llm_client.types import CallType, MessageRole, PromptSegment
 from memory_system.types import (
+    CompactionReason,
     EventLogEntry,
     EventType,
     MemoryEntry,
@@ -23,6 +25,13 @@ from memory_system.types import (
 
 
 _UNKNOWN_RELATIONSHIP_DESCRIPTION = "I don't know anything about them."
+_SHORT_TERM_COMPACTION_PROMPT = (
+    "Here is a log of everything you experienced recently: {log}. "
+    "In 128 tokens (~90 words), form an EXTREMELY CONCISE summary of the salient "
+    "memories you experienced. This will be recorded in the future and the rest "
+    "will be thrown out. Prioritize information you will use to inform later "
+    "actions or opinions on others. Prioritize information density and accuracy."
+)
 
 
 class MemorySystem:
@@ -82,6 +91,12 @@ class MemorySystem:
             EventLogEntry(game_time=game_time, type=EventType.THOUGHT, text=text),
         )
 
+    @staticmethod
+    def _serialize_event_log_entries(entries: list[EventLogEntry]) -> str:
+        """Return one stable string serialization of a chronological event log slice."""
+
+        return "\n".join(json.dumps(asdict(entry)) for entry in entries)
+
     def write_impressions(
         self,
         speaker_id: VillagerId,
@@ -97,6 +112,31 @@ class MemorySystem:
             relationship.recent_impressions.pop(0)
         if desc_update is not None:
             relationship.description = desc_update
+
+    async def trigger_short_term_compaction(
+        self,
+        villager_id: VillagerId,
+        game_time: int,
+        reason: CompactionReason,
+    ) -> None:
+        """Compact one villager's active context log into one short-term memory entry."""
+
+        del reason
+        active_context_log = self._active_context_log[villager_id]
+        if len(active_context_log) == 0:
+            return
+
+        prompt = _SHORT_TERM_COMPACTION_PROMPT.format(
+            log=self._serialize_event_log_entries(active_context_log)
+        )
+        response = await self._llm_client.complete(
+            [PromptSegment(role=MessageRole.USER, text=prompt)],
+            CallType.MEMORY_COMPACTION,
+        )
+        self._short_term_memories[villager_id].append(
+            MemoryEntry(game_time=game_time, text=response.text)
+        )
+        active_context_log.clear()
 
     @staticmethod
     def _copy_memory_map(
