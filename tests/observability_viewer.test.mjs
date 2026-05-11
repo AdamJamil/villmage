@@ -27,9 +27,12 @@ const REPLAY_CORE_FIXTURE = path.join(
  *
  * @param {(url: string) => Promise<{json: () => Promise<object>, text: () => Promise<string>}>} fetchImpl
  * @returns {Promise<{
+ *   initSession: (dataDir: string) => Promise<object>,
  *   loadAllCheckpoints: (dataDir: string) => Promise<object[]>,
  *   loadDeltaIndex: (dataDir: string) => Promise<Map<number, object[]>>,
  *   reconstructStateAt: (checkpoints: object[], deltaIndex: Map<number, object[]>, targetTime: number) => {villager_states: Map<string, object>, world_state: object},
+ *   scrollToEvent: (session: object, eventIndex: number) => object,
+ *   selectVillager: (session: object, villagerId: string) => Promise<object>,
  * }>}
  */
 async function loadViewerApi(fetchImpl) {
@@ -44,6 +47,7 @@ async function loadViewerApi(fetchImpl) {
     Map,
     Set,
     URL,
+    encodeURIComponent,
   });
   vm.runInContext(scriptMatch[1], context);
   return context.globalThis.villmageObservability;
@@ -94,6 +98,53 @@ function createFixtureFetch(fixtureDir, checkpointListing) {
       };
     },
   };
+}
+
+/**
+ * Return one session snapshot that is stable across VM realms.
+ *
+ * @param {object} session
+ * @returns {object}
+ */
+function snapshotSession(session) {
+  return {
+    current_game_time: session.current_game_time,
+    selected_villager_id: session.selected_villager_id,
+    visible_events: session.visible_events.map((entry) => ({
+      game_time: entry.game_time,
+      text: entry.text,
+    })),
+    villager_states: snapshotVillagerStates(session.villager_states),
+    world_state: snapshotViewerState(session.world_state),
+  };
+}
+
+/**
+ * Return one Map snapshot with Set values converted for assertion.
+ *
+ * @param {Map<string, object>} villagerStates
+ * @returns {Record<string, object>}
+ */
+function snapshotVillagerStates(villagerStates) {
+  const snapshot = {};
+  for (const [villagerId, villagerState] of villagerStates.entries()) {
+    snapshot[villagerId] = snapshotViewerState(villagerState);
+  }
+  return snapshot;
+}
+
+/**
+ * Return one plain-object snapshot with changed_fields normalized.
+ *
+ * @param {object} viewerState
+ * @returns {object}
+ */
+function snapshotViewerState(viewerState) {
+  const snapshot = structuredClone(viewerState);
+  if (viewerState.changed_fields instanceof Set) {
+    snapshot.changed_fields = [...viewerState.changed_fields].sort();
+  }
+  return snapshot;
 }
 
 test("loadAllCheckpoints returns checkpoints sorted by game_time", async () => {
@@ -179,6 +230,7 @@ test("reconstructStateAt applies WORLD_STATE deltas", async () => {
   const reconstructed = viewerApi.reconstructStateAt(checkpoints, deltaIndex, 450);
 
   assert.equal(reconstructed.world_state.fire_lit, true);
+  assert.equal(reconstructed.world_state.water_supply_liters, 12);
 });
 
 test("reconstructStateAt applies MEMORY_UPDATE deltas", async () => {
@@ -238,4 +290,119 @@ test("reconstructStateAt does not resurrect dead villagers", async () => {
   const reconstructed = viewerApi.reconstructStateAt(checkpoints, deltaIndex, 800);
 
   assert.equal(reconstructed.villager_states.has("aldric"), false);
+});
+
+test("initSession positions at the last event in the first villager log", async () => {
+  const fixtureFetch = createFixtureFetch(REPLAY_CORE_FIXTURE, [
+    "00360.json",
+    "00720.json",
+  ]);
+  const viewerApi = await loadViewerApi(fixtureFetch.fetchImpl);
+
+  const session = await viewerApi.initSession(fixtureFetch.baseUrl);
+
+  assert.equal(session.selected_villager_id, "aldric");
+  assert.equal(session.current_game_time, 600);
+  assert.equal(session.villager_states.has("aldric"), true);
+  assert.equal(session.villager_states.has("sewalt"), true);
+});
+
+test("selectVillager swaps visible_events without replaying state", async () => {
+  const fixtureFetch = createFixtureFetch(REPLAY_CORE_FIXTURE, [
+    "00360.json",
+    "00720.json",
+  ]);
+  const viewerApi = await loadViewerApi(fixtureFetch.fetchImpl);
+  const session = await viewerApi.initSession(fixtureFetch.baseUrl);
+  const before = snapshotSession(session);
+
+  await viewerApi.selectVillager(session, "sewalt");
+  const after = snapshotSession(session);
+
+  assert.equal(after.selected_villager_id, "sewalt");
+  assert.equal(after.visible_events[0].text, "Sewalt wakes and checks the path.");
+  assert.notEqual(after.visible_events[0].text, before.visible_events[0].text);
+  assert.equal(after.current_game_time, before.current_game_time);
+  assert.deepEqual(after.villager_states, before.villager_states);
+  assert.deepEqual(after.world_state, before.world_state);
+});
+
+test("scrollToEvent forward applies deltas incrementally", async () => {
+  const fixtureFetch = createFixtureFetch(REPLAY_CORE_FIXTURE, [
+    "00360.json",
+    "00720.json",
+  ]);
+  const viewerApi = await loadViewerApi(fixtureFetch.fetchImpl);
+  const session = await viewerApi.initSession(fixtureFetch.baseUrl);
+
+  viewerApi.scrollToEvent(session, 0);
+  viewerApi.scrollToEvent(session, 1);
+
+  assert.equal(session.current_game_time, 400);
+  assert.equal(session.villager_states.get("aldric").wakefulness, 85);
+});
+
+test("scrollToEvent backward reconstructs from the nearest checkpoint", async () => {
+  const fixtureFetch = createFixtureFetch(REPLAY_CORE_FIXTURE, [
+    "00360.json",
+    "00720.json",
+  ]);
+  const viewerApi = await loadViewerApi(fixtureFetch.fetchImpl);
+  const checkpoints = await viewerApi.loadAllCheckpoints(fixtureFetch.baseUrl);
+  const deltaIndex = await viewerApi.loadDeltaIndex(fixtureFetch.baseUrl);
+  const session = await viewerApi.initSession(fixtureFetch.baseUrl);
+
+  viewerApi.scrollToEvent(session, 4);
+  viewerApi.scrollToEvent(session, 1);
+
+  assert.deepEqual(
+    snapshotVillagerStates(session.villager_states),
+    snapshotVillagerStates(
+      viewerApi.reconstructStateAt(checkpoints, deltaIndex, 400).villager_states,
+    ),
+  );
+  assert.deepEqual(
+    snapshotViewerState(session.world_state),
+    snapshotViewerState(
+      viewerApi.reconstructStateAt(checkpoints, deltaIndex, 400).world_state,
+    ),
+  );
+});
+
+test("scrollToEvent updates changed_fields only for the new game_time", async () => {
+  const fixtureFetch = createFixtureFetch(REPLAY_CORE_FIXTURE, [
+    "00360.json",
+    "00720.json",
+  ]);
+  const viewerApi = await loadViewerApi(fixtureFetch.fetchImpl);
+  const session = await viewerApi.initSession(fixtureFetch.baseUrl);
+
+  viewerApi.scrollToEvent(session, 3);
+  assert.equal(
+    session.world_state.changed_fields.has("water_supply_liters"),
+    true,
+  );
+
+  viewerApi.scrollToEvent(session, 4);
+  assert.equal(
+    session.world_state.changed_fields.has("water_supply_liters"),
+    false,
+  );
+});
+
+test("scrollToEvent is idempotent across events with the same game_time", async () => {
+  const fixtureFetch = createFixtureFetch(REPLAY_CORE_FIXTURE, [
+    "00360.json",
+    "00720.json",
+  ]);
+  const viewerApi = await loadViewerApi(fixtureFetch.fetchImpl);
+  const session = await viewerApi.initSession(fixtureFetch.baseUrl);
+
+  viewerApi.scrollToEvent(session, 0);
+  viewerApi.scrollToEvent(session, 1);
+  const wakefulnessAfterFirstScroll = session.villager_states.get("aldric").wakefulness;
+  viewerApi.scrollToEvent(session, 2);
+
+  assert.equal(session.current_game_time, 400);
+  assert.equal(session.villager_states.get("aldric").wakefulness, wakefulnessAfterFirstScroll);
 });

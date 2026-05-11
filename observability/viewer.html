@@ -58,6 +58,20 @@
       }
 
       /**
+       * Parse one JSONL payload into objects.
+       *
+       * @param {string} rawText
+       * @returns {Record<string, unknown>[]}
+       */
+      function parseJsonLines(rawText) {
+        return rawText
+          .split(/\r?\n/)
+          .map((rawLine) => rawLine.trim())
+          .filter((rawLine) => rawLine !== "")
+          .map((rawLine) => JSON.parse(rawLine));
+      }
+
+      /**
        * Return all JSON checkpoint URLs linked from one directory listing.
        *
        * @param {string} listingHtml
@@ -190,31 +204,45 @@
        * @returns {Record<string, unknown>}
        */
       function buildWorldViewerState(worldState, targetTime, changedFields) {
-        const fire = /** @type {{lit?: boolean, extinction_timestamp?: number | null}} */ (
+        const fire = /** @type {{lit?: boolean, extinction_timestamp?: number | null, remaining_minutes?: number}} */ (
           worldState.fire || {}
         );
         const extinctionTimestamp = fire.extinction_timestamp;
+        const waterSupplyMl =
+          typeof worldState.water_supply_liters === "number"
+              ? Number(worldState.water_supply_liters) * 1000
+            : typeof worldState.water_supply_ml === "number"
+              ? Number(worldState.water_supply_ml)
+              : 0;
         const remainingMinutes =
-          fire.lit && typeof extinctionTimestamp === "number"
-            ? Math.max(0, extinctionTimestamp - targetTime)
-            : 0;
+          typeof fire.remaining_minutes === "number"
+            ? Number(fire.remaining_minutes)
+            : fire.lit && typeof extinctionTimestamp === "number"
+              ? Math.max(0, extinctionTimestamp - targetTime)
+              : 0;
         return {
           base_storage: filterZeroValues(
             /** @type {Record<string, number>} */ (worldState.base_storage || {}),
           ),
-          water_supply_ml: Number(worldState.water_supply_ml || 0),
-          water_supply_liters: Number(worldState.water_supply_ml || 0) / 1000,
+          water_supply_ml: waterSupplyMl,
+          water_supply_liters: waterSupplyMl / 1000,
           fire_lit: Boolean(fire.lit),
           fire_remaining_minutes: remainingMinutes,
-          total_dirtiness: getTotalDirtiness(
-            /** @type {{dirtiness_counts?: Record<string, number>}} */ (worldState),
-          ),
+          total_dirtiness:
+            typeof worldState.total_dirtiness === "number"
+              ? Number(worldState.total_dirtiness)
+              : getTotalDirtiness(
+                  /** @type {{dirtiness_counts?: Record<string, number>}} */ (worldState),
+                ),
           placed_resting_spots: cloneJsonValue(
             /** @type {Record<string, string>} */ (worldState.placed_resting_spots || {}),
           ),
-          live_carcass_count: Array.isArray(worldState.live_carcasses)
-            ? worldState.live_carcasses.length
-            : 0,
+          live_carcass_count:
+            typeof worldState.live_carcass_count === "number"
+              ? Number(worldState.live_carcass_count)
+              : Array.isArray(worldState.live_carcasses)
+                ? worldState.live_carcasses.length
+                : 0,
           changed_fields: cloneStringSet(changedFields),
         };
       }
@@ -242,6 +270,24 @@
           current = /** @type {Record<string, unknown>} */ (current[pathPart]);
         }
         current[pathParts[pathParts.length - 1]] = nextValue;
+      }
+
+      /**
+       * Return one empty memory-state baseline.
+       *
+       * @param {string} villagerId
+       * @returns {Record<string, unknown>}
+       */
+      function buildEmptyMemoryState(villagerId) {
+        return {
+          villager_id: villagerId,
+          short_term_memories: [],
+          medium_term_memories: [],
+          long_term_memories: [],
+          active_context_log: [],
+          relationships: {},
+          last_long_term_compaction_day: 0,
+        };
       }
 
       /**
@@ -282,7 +328,7 @@
        * Apply one non-memory delta record to a living villager.
        *
        * @param {Record<string, unknown>} villagerState
-       * @param {{changes?: {field: string, new_value: string}[]}} deltaRecord
+       * @param {{kind?: number, changes?: {field: string, new_value: string}[]}} deltaRecord
        * @returns {void}
        */
       function applyVillagerDelta(villagerState, deltaRecord) {
@@ -392,6 +438,214 @@
       }
 
       /**
+       * Return the ordered delta times between two times.
+       *
+       * @param {Map<number, Record<string, unknown>[]>} deltaIndex
+       * @param {number} startTimeExclusive
+       * @param {number} endTimeInclusive
+       * @returns {number[]}
+       */
+      function getRelevantDeltaTimes(deltaIndex, startTimeExclusive, endTimeInclusive) {
+        return [...deltaIndex.keys()]
+          .filter(
+            (gameTime) =>
+              startTimeExclusive < gameTime && gameTime <= endTimeInclusive,
+          )
+          .sort((left, right) => left - right);
+      }
+
+      /**
+       * Return one empty changed-field map for all living villagers in one replay state.
+       *
+       * @param {{villagerStates: Map<string, Record<string, unknown>>}} replayState
+       * @returns {Map<string, Set<string>>}
+       */
+      function createEmptyVillagerChangedFields(replayState) {
+        const villagerChangedFields = new Map();
+        for (const villagerId of replayState.villagerStates.keys()) {
+          villagerChangedFields.set(villagerId, new Set());
+        }
+        return villagerChangedFields;
+      }
+
+      /**
+       * Apply all deltas in one time range to one raw replay state.
+       *
+       * @param {{villagerStates: Map<string, Record<string, unknown>>, memoryStates: Map<string, Record<string, unknown>>, worldState: Record<string, unknown>}} replayState
+       * @param {Map<number, Record<string, unknown>[]>} deltaIndex
+       * @param {number} startTimeExclusive
+       * @param {number} targetTime
+       * @returns {{villagerChangedFields: Map<string, Set<string>>, worldChangedFields: Set<string>}}
+       */
+      function applyDeltaRange(
+        replayState,
+        deltaIndex,
+        startTimeExclusive,
+        targetTime,
+      ) {
+        const villagerChangedFields = createEmptyVillagerChangedFields(replayState);
+        const worldChangedFields = new Set();
+        const relevantTimes = getRelevantDeltaTimes(
+          deltaIndex,
+          startTimeExclusive,
+          targetTime,
+        );
+
+        for (const gameTime of relevantTimes) {
+          const deltaRecords = deltaIndex.get(gameTime) || [];
+          for (const deltaRecord of deltaRecords) {
+            if (deltaRecord.kind === 1 || deltaRecord.kind === 2) {
+              const villagerId = String(deltaRecord.villager_id);
+              const villagerState = replayState.villagerStates.get(villagerId);
+              if (villagerState === undefined) {
+                continue;
+              }
+              applyVillagerDelta(villagerState, deltaRecord);
+              if (gameTime === targetTime) {
+                const changedFields =
+                  villagerChangedFields.get(villagerId) || new Set();
+                for (const change of deltaRecord.changes || []) {
+                  changedFields.add(change.field);
+                }
+                villagerChangedFields.set(villagerId, changedFields);
+              }
+              continue;
+            }
+
+            if (deltaRecord.kind === 3) {
+              applyWorldDelta(replayState.worldState, deltaRecord);
+              if (gameTime === targetTime) {
+                for (const change of deltaRecord.changes || []) {
+                  worldChangedFields.add(change.field);
+                }
+              }
+              continue;
+            }
+
+            if (deltaRecord.kind === 4) {
+              const villagerId = String(deltaRecord.villager_id);
+              const memoryState =
+                replayState.memoryStates.get(villagerId) ||
+                buildEmptyMemoryState(villagerId);
+              applyMemoryDelta(memoryState, deltaRecord);
+              replayState.memoryStates.set(villagerId, memoryState);
+            }
+          }
+        }
+
+        return {
+          villagerChangedFields,
+          worldChangedFields,
+        };
+      }
+
+      /**
+       * Project one raw replay state into viewer-state objects.
+       *
+       * @param {{villagerStates: Map<string, Record<string, unknown>>, memoryStates: Map<string, Record<string, unknown>>, worldState: Record<string, unknown>}} replayState
+       * @param {number} targetTime
+       * @param {Map<string, Set<string>>} villagerChangedFields
+       * @param {Set<string>} worldChangedFields
+       * @returns {{villager_states: Map<string, Record<string, unknown>>, world_state: Record<string, unknown>}}
+       */
+      function buildViewerProjection(
+        replayState,
+        targetTime,
+        villagerChangedFields,
+        worldChangedFields,
+      ) {
+        const villagerStates = new Map();
+        for (const [villagerId, villagerState] of replayState.villagerStates.entries()) {
+          const memoryState = replayState.memoryStates.get(villagerId) || null;
+          villagerStates.set(
+            villagerId,
+            buildVillagerViewerState(
+              villagerState,
+              memoryState,
+              villagerChangedFields.get(villagerId) || new Set(),
+            ),
+          );
+        }
+        return {
+          villager_states: villagerStates,
+          world_state: buildWorldViewerState(
+            replayState.worldState,
+            targetTime,
+            worldChangedFields,
+          ),
+        };
+      }
+
+      /**
+       * Reconstruct raw replay state at one target time.
+       *
+       * @param {Record<string, unknown>[]} checkpoints
+       * @param {Map<number, Record<string, unknown>[]>} deltaIndex
+       * @param {number} targetTime
+       * @returns {{checkpointTime: number, replayState: {villagerStates: Map<string, Record<string, unknown>>, memoryStates: Map<string, Record<string, unknown>>, worldState: Record<string, unknown>}, villagerChangedFields: Map<string, Set<string>>, worldChangedFields: Set<string>}}
+       */
+      function reconstructRawStateAt(checkpoints, deltaIndex, targetTime) {
+        const checkpoint = checkpoints
+          .filter((entry) => Number(entry.game_time) <= targetTime)
+          .sort((left, right) => Number(right.game_time) - Number(left.game_time))[0];
+        if (checkpoint === undefined) {
+          throw new Error(`No checkpoint exists at or before target time ${targetTime}.`);
+        }
+
+        const checkpointTime = Number(checkpoint.game_time);
+        const replayState = cloneCheckpointState(checkpoint);
+        const changedFields = applyDeltaRange(
+          replayState,
+          deltaIndex,
+          checkpointTime,
+          targetTime,
+        );
+        return {
+          checkpointTime,
+          replayState,
+          villagerChangedFields: changedFields.villagerChangedFields,
+          worldChangedFields: changedFields.worldChangedFields,
+        };
+      }
+
+      /**
+       * Return the stored villager ids ordered by first appearance.
+       *
+       * @param {Record<string, unknown>[]} checkpoints
+       * @returns {string[]}
+       */
+      function listVillagerIds(checkpoints) {
+        const villagerIds = [];
+        const seenIds = new Set();
+        for (const checkpoint of checkpoints) {
+          for (const villagerState of checkpoint.villager_states || []) {
+            const villagerId = String(villagerState.villager_id);
+            if (seenIds.has(villagerId)) {
+              continue;
+            }
+            seenIds.add(villagerId);
+            villagerIds.push(villagerId);
+          }
+        }
+        return villagerIds;
+      }
+
+      /**
+       * Load one villager event log.
+       *
+       * @param {string} dataDir
+       * @param {string} villagerId
+       * @returns {Promise<Record<string, unknown>[]>}
+       */
+      async function loadEventLog(dataDir, villagerId) {
+        const normalizedDataDir = normalizeDataDir(dataDir);
+        const response = await fetch(
+          `${normalizedDataDir}/events/${encodeURIComponent(villagerId)}.jsonl`,
+        );
+        return parseJsonLines(await response.text());
+      }
+
+      /**
        * Return all checkpoint records sorted chronologically.
        *
        * @param {string} dataDir
@@ -424,20 +678,172 @@
       async function loadDeltaIndex(dataDir) {
         const normalizedDataDir = normalizeDataDir(dataDir);
         const response = await fetch(`${normalizedDataDir}/state_deltas.jsonl`);
-        const rawText = await response.text();
         const deltaIndex = new Map();
-        for (const rawLine of rawText.split(/\r?\n/)) {
-          const trimmedLine = rawLine.trim();
-          if (trimmedLine === "") {
-            continue;
-          }
-          const deltaRecord = JSON.parse(trimmedLine);
+        for (const deltaRecord of parseJsonLines(await response.text())) {
           const gameTime = Number(deltaRecord.game_time);
           const existingBucket = deltaIndex.get(gameTime) || [];
           existingBucket.push(deltaRecord);
           deltaIndex.set(gameTime, existingBucket);
         }
         return deltaIndex;
+      }
+
+      /**
+       * Copy viewer-visible state fields onto one session object.
+       *
+       * @param {Record<string, unknown>} session
+       * @param {{villager_states: Map<string, Record<string, unknown>>, world_state: Record<string, unknown>}} projectedState
+       * @param {number} currentGameTime
+       * @returns {Record<string, unknown>}
+       */
+      function assignSessionState(session, projectedState, currentGameTime) {
+        session.current_game_time = currentGameTime;
+        session.villager_states = projectedState.villager_states;
+        session.world_state = projectedState.world_state;
+        return session;
+      }
+
+      /**
+       * Load replay files and initialize one session at the end of the first log.
+       *
+       * @param {string} dataDir
+       * @returns {Promise<Record<string, unknown>>}
+       */
+      async function initSession(dataDir) {
+        const checkpoints = await loadAllCheckpoints(dataDir);
+        const deltaIndex = await loadDeltaIndex(dataDir);
+        const villagerIds = listVillagerIds(checkpoints);
+        if (villagerIds.length === 0) {
+          throw new Error("Cannot initialize viewer session without villagers.");
+        }
+
+        const selectedVillagerId = villagerIds[0];
+        const visibleEvents = await loadEventLog(dataDir, selectedVillagerId);
+        if (visibleEvents.length === 0) {
+          throw new Error(`Villager ${selectedVillagerId} has no event log entries.`);
+        }
+
+        const currentEventIndex = visibleEvents.length - 1;
+        const currentGameTime = Number(visibleEvents[currentEventIndex].game_time);
+        const reconstructedState = reconstructRawStateAt(
+          checkpoints,
+          deltaIndex,
+          currentGameTime,
+        );
+        const session = {
+          selected_villager_id: selectedVillagerId,
+          current_game_time: currentGameTime,
+          villager_states: new Map(),
+          world_state: {},
+          visible_events: visibleEvents,
+          _checkpoints: checkpoints,
+          _current_event_index: currentEventIndex,
+          _data_dir: dataDir,
+          _delta_index: deltaIndex,
+          _event_logs: new Map([[selectedVillagerId, visibleEvents]]),
+          _replay_checkpoint_time: reconstructedState.checkpointTime,
+          _replay_state: reconstructedState.replayState,
+        };
+        return assignSessionState(
+          session,
+          buildViewerProjection(
+            reconstructedState.replayState,
+            currentGameTime,
+            reconstructedState.villagerChangedFields,
+            reconstructedState.worldChangedFields,
+          ),
+          currentGameTime,
+        );
+      }
+
+      /**
+       * Swap the visible log to one villager without changing replay state.
+       *
+       * @param {Record<string, unknown>} session
+       * @param {string} villagerId
+       * @returns {Promise<Record<string, unknown>>}
+       */
+      async function selectVillager(session, villagerId) {
+        const eventLogs = /** @type {Map<string, Record<string, unknown>[]>} */ (
+          session._event_logs
+        );
+        let visibleEvents = eventLogs.get(villagerId);
+        if (visibleEvents === undefined) {
+          visibleEvents = await loadEventLog(String(session._data_dir), villagerId);
+          eventLogs.set(villagerId, visibleEvents);
+        }
+
+        session.selected_villager_id = villagerId;
+        session.visible_events = visibleEvents;
+        session._current_event_index = visibleEvents.findIndex(
+          (eventEntry) => Number(eventEntry.game_time) === session.current_game_time,
+        );
+        return session;
+      }
+
+      /**
+       * Move one session to the target visible event.
+       *
+       * @param {Record<string, unknown>} session
+       * @param {number} eventIndex
+       * @returns {Record<string, unknown>}
+       */
+      function scrollToEvent(session, eventIndex) {
+        const visibleEvents = /** @type {Record<string, unknown>[]} */ (
+          session.visible_events
+        );
+        if (eventIndex < 0 || eventIndex >= visibleEvents.length) {
+          throw new Error(`Event index ${eventIndex} is out of bounds.`);
+        }
+
+        const targetTime = Number(visibleEvents[eventIndex].game_time);
+        const currentTime = Number(session.current_game_time);
+        if (targetTime === currentTime) {
+          session._current_event_index = eventIndex;
+          return session;
+        }
+
+        if (targetTime > currentTime) {
+          const replayState = /** @type {{villagerStates: Map<string, Record<string, unknown>>, memoryStates: Map<string, Record<string, unknown>>, worldState: Record<string, unknown>}} */ (
+            session._replay_state
+          );
+          const changedFields = applyDeltaRange(
+            replayState,
+            /** @type {Map<number, Record<string, unknown>[]>} */ (session._delta_index),
+            currentTime,
+            targetTime,
+          );
+          session._current_event_index = eventIndex;
+          return assignSessionState(
+            session,
+            buildViewerProjection(
+              replayState,
+              targetTime,
+              changedFields.villagerChangedFields,
+              changedFields.worldChangedFields,
+            ),
+            targetTime,
+          );
+        }
+
+        const reconstructedState = reconstructRawStateAt(
+          /** @type {Record<string, unknown>[]} */ (session._checkpoints),
+          /** @type {Map<number, Record<string, unknown>[]>} */ (session._delta_index),
+          targetTime,
+        );
+        session._current_event_index = eventIndex;
+        session._replay_checkpoint_time = reconstructedState.checkpointTime;
+        session._replay_state = reconstructedState.replayState;
+        return assignSessionState(
+          session,
+          buildViewerProjection(
+            reconstructedState.replayState,
+            targetTime,
+            reconstructedState.villagerChangedFields,
+            reconstructedState.worldChangedFields,
+          ),
+          targetTime,
+        );
       }
 
       /**
@@ -449,92 +855,26 @@
        * @returns {{villager_states: Map<string, Record<string, unknown>>, world_state: Record<string, unknown>}}
        */
       function reconstructStateAt(checkpoints, deltaIndex, targetTime) {
-        const checkpoint = checkpoints
-          .filter((entry) => Number(entry.game_time) <= targetTime)
-          .sort((left, right) => Number(right.game_time) - Number(left.game_time))[0];
-        if (checkpoint === undefined) {
-          throw new Error(`No checkpoint exists at or before target time ${targetTime}.`);
-        }
-
-        const checkpointTime = Number(checkpoint.game_time);
-        const replayState = cloneCheckpointState(checkpoint);
-        const villagerChangedFields = new Map();
-        const worldChangedFields = new Set();
-        for (const villagerId of replayState.villagerStates.keys()) {
-          villagerChangedFields.set(villagerId, new Set());
-        }
-
-        const relevantTimes = [...deltaIndex.keys()]
-          .filter((gameTime) => checkpointTime < gameTime && gameTime <= targetTime)
-          .sort((left, right) => left - right);
-
-        for (const gameTime of relevantTimes) {
-          const deltaRecords = deltaIndex.get(gameTime) || [];
-          for (const deltaRecord of deltaRecords) {
-            if (deltaRecord.kind === 1 || deltaRecord.kind === 2) {
-              const villagerId = String(deltaRecord.villager_id);
-              const villagerState = replayState.villagerStates.get(villagerId);
-              if (villagerState === undefined) {
-                continue;
-              }
-              applyVillagerDelta(villagerState, deltaRecord);
-              if (gameTime === targetTime) {
-                const changedFields = villagerChangedFields.get(villagerId) || new Set();
-                for (const change of deltaRecord.changes || []) {
-                  changedFields.add(change.field);
-                }
-                villagerChangedFields.set(villagerId, changedFields);
-              }
-              continue;
-            }
-
-            if (deltaRecord.kind === 3) {
-              applyWorldDelta(replayState.worldState, deltaRecord);
-              if (gameTime === targetTime) {
-                for (const change of deltaRecord.changes || []) {
-                  worldChangedFields.add(change.field);
-                }
-              }
-              continue;
-            }
-
-            if (deltaRecord.kind === 4) {
-              const villagerId = String(deltaRecord.villager_id);
-              const memoryState = replayState.memoryStates.get(villagerId);
-              if (memoryState !== undefined) {
-                applyMemoryDelta(memoryState, deltaRecord);
-              }
-            }
-          }
-        }
-
-        const villagerStates = new Map();
-        for (const [villagerId, villagerState] of replayState.villagerStates.entries()) {
-          const memoryState = replayState.memoryStates.get(villagerId) || null;
-          villagerStates.set(
-            villagerId,
-            buildVillagerViewerState(
-              villagerState,
-              memoryState,
-              villagerChangedFields.get(villagerId) || new Set(),
-            ),
-          );
-        }
-
-        return {
-          villager_states: villagerStates,
-          world_state: buildWorldViewerState(
-            replayState.worldState,
-            targetTime,
-            worldChangedFields,
-          ),
-        };
+        const reconstructedState = reconstructRawStateAt(
+          checkpoints,
+          deltaIndex,
+          targetTime,
+        );
+        return buildViewerProjection(
+          reconstructedState.replayState,
+          targetTime,
+          reconstructedState.villagerChangedFields,
+          reconstructedState.worldChangedFields,
+        );
       }
 
       globalScope.villmageObservability = {
+        initSession,
         loadAllCheckpoints,
         loadDeltaIndex,
         reconstructStateAt,
+        scrollToEvent,
+        selectVillager,
       };
     })(globalThis);
   </script>

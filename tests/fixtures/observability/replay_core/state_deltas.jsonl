@@ -1,6 +1,7 @@
 {"game_time":400,"kind":1,"villager_id":"aldric","changes":[{"field":"wakefulness","old_value":"100","new_value":"85"}]}
 {"game_time":420,"kind":2,"villager_id":"sewalt","changes":[{"field":"PEACH","old_value":"0","new_value":"3"}]}
 {"game_time":450,"kind":3,"changes":[{"field":"fire.lit","old_value":"false","new_value":"true"}]}
+{"game_time":450,"kind":3,"changes":[{"field":"water_supply_liters","old_value":"9","new_value":"12"}]}
 {"game_time":500,"kind":4,"villager_id":"aldric","memory_kind":"short_term","content":"Aldric remembers the flare-up."}
 {"game_time":500,"kind":1,"villager_id":"aldric","changes":[{"field":"satiation","old_value":"1500","new_value":"1350"}]}
 {"game_time":600,"kind":3,"changes":[{"field":"base_storage.PEACH","old_value":"2","new_value":"4"}]}
