@@ -8,21 +8,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from villmage.game_types import ItemType
+from villmage.game_types import CraftableItem, ItemType
 
 if TYPE_CHECKING:
     from character_canon.canon import CharacterCanon
     from villmage.villager_state import VillagerState
     from villmage.world_state import WorldState
-
-
-class CraftableItem(Enum):
-    """Crafting targets that may be selected for a new crafting job."""
-
-    SATCHEL = 1
-    BED_ROLL = 2
-    COT = 3
-
 
 class ExploreResource(Enum):
     """Resource targets available through exploration actions."""

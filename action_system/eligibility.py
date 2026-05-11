@@ -47,7 +47,7 @@ _CRAFTABLE_OUTPUT_ITEM: dict[CraftableItem, ItemType] = {
     CraftableItem.COT: ItemType.COT,
 }
 
-_CRAFTING_REQUIREMENTS: dict[CraftableItem, tuple[tuple[ItemType, int], ...]] = {
+CRAFTING_REQUIREMENTS: dict[CraftableItem, tuple[tuple[ItemType, int], ...]] = {
     CraftableItem.SATCHEL: ((ItemType.PROCESSED_HIDE, 1),),
     CraftableItem.BED_ROLL: (
         (ItemType.PROCESSED_HIDE, 1),
@@ -142,7 +142,7 @@ def _missing_material_requirements(
     """Return authored missing-material descriptions for one crafting recipe."""
 
     missing_materials: list[str] = []
-    for item, needed_count in _CRAFTING_REQUIREMENTS[craftable_item]:
+    for item, needed_count in CRAFTING_REQUIREMENTS[craftable_item]:
         if _total_available_item_count(ctx, item) < needed_count:
             missing_materials.append(f"{needed_count} {_item_name(item)}")
     return missing_materials
@@ -166,7 +166,7 @@ def _craft_recipe_action(
 
     requirements_text = ", ".join(
         f"{needed_count} {_item_name(item)}"
-        for item, needed_count in _CRAFTING_REQUIREMENTS[craftable_item]
+        for item, needed_count in CRAFTING_REQUIREMENTS[craftable_item]
     )
     prompt_text = (
         f"Craft {_craftable_name(craftable_item)} "
