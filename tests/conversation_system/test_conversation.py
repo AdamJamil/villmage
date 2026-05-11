@@ -12,8 +12,10 @@ import pytest
 from conversation_system.conversation import ConversationSystem, format_turn_text
 from conversation_system.types import ConversationSession
 from memory_system.types import EventLogEntry, VillagerId as MemoryVillagerId
+from villmage.game_types import ActionCategory
 from villmage.ai_coordinator.types import ConversationTurn
 from villmage.ai_coordinator.types import ConvActionType, ConversationTurnResult
+from villmage.villager_state import CurrentAction, VillagerState
 
 
 class _CanonVillager:
@@ -51,6 +53,29 @@ class _MemoryRecorder:
         """Record one appended event under the villager's stable id."""
 
         self.events_by_villager.setdefault(str(villager_id), []).append(entry)
+
+
+def _current_action(
+    category: ActionCategory,
+    detail: str | None = None,
+) -> CurrentAction:
+    """Build a minimal current-action snapshot for conversation tests."""
+
+    return CurrentAction(category=category, detail=detail, completion_timestamp=0)
+
+
+def _villager_state(
+    villager_id: str,
+    *,
+    wakefulness: float = 50.0,
+    current_action: CurrentAction | None = None,
+) -> VillagerState:
+    """Build one villager-state fixture with the supplied availability fields."""
+
+    villager_state = VillagerState(villager_id)
+    villager_state.wakefulness = wakefulness
+    villager_state.set_current_action(current_action)
+    return villager_state
 
 
 @pytest.mark.parametrize(
@@ -470,3 +495,167 @@ def test_resolve_single_turn_returns_none_for_all_silent_group() -> None:
     assert result is None
     assert session.full_turn_log == [ConversationTurn(villager_id="aldric", text="Earlier turn.")]
     assert memory.events_by_villager == {}
+
+
+def test_pause_for_joiners_queries_only_eligible_villagers() -> None:
+    """Only awake at-base non-participants are queried for a join decision."""
+
+    coordinator = Mock()
+    coordinator.get_join_decision.return_value = False
+    villager_states = {
+        "initiator": _villager_state("initiator"),
+        "target": _villager_state("target"),
+        "joiner": _villager_state(
+            "joiner",
+            current_action=_current_action(ActionCategory.RESTING, "watching the fire"),
+        ),
+        "explorer": _villager_state(
+            "explorer",
+            current_action=_current_action(ActionCategory.EXPLORING),
+        ),
+        "hauler": _villager_state(
+            "hauler",
+            current_action=_current_action(ActionCategory.HAULING),
+        ),
+        "sleeper": _villager_state("sleeper", wakefulness=0.0),
+    }
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        villager_states=villager_states,
+    )
+    session = ConversationSession(
+        participant_ids=["initiator", "target"],
+        all_participant_ids=["initiator", "target"],
+        full_turn_log=[
+            ConversationTurn(villager_id="initiator", text="First."),
+            ConversationTurn(villager_id="target", text="Second."),
+        ],
+        join_turn_index={"initiator": 0, "target": 0},
+        elapsed_game_minutes=10,
+        last_spoke_turn={"initiator": 0, "target": 1},
+    )
+
+    asyncio.run(system._pause_for_joiners(session, 150))
+
+    queried_ids = [call.args[0] for call in coordinator.get_join_decision.call_args_list]
+    assert queried_ids == ["joiner"]
+
+
+def test_pause_for_joiners_uses_explicit_opening_excerpt_snapshot() -> None:
+    """Join-decision snapshots always use the first two logged turns only."""
+
+    coordinator = Mock()
+    coordinator.get_join_decision.return_value = False
+    joiner_state = _villager_state(
+        "joiner",
+        current_action=_current_action(ActionCategory.RESTING, "gathering sticks"),
+    )
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        villager_states={"joiner": joiner_state},
+    )
+    full_turn_log = [
+        ConversationTurn(villager_id="alpha", text="Turn 0."),
+        ConversationTurn(villager_id="beta", text="Turn 1."),
+        ConversationTurn(villager_id="gamma", text="Turn 2."),
+    ]
+    session = ConversationSession(
+        participant_ids=["alpha", "beta"],
+        all_participant_ids=["alpha", "beta"],
+        full_turn_log=full_turn_log,
+        join_turn_index={"alpha": 0, "beta": 0},
+        elapsed_game_minutes=10,
+        last_spoke_turn={"alpha": 0, "beta": 1},
+    )
+
+    asyncio.run(system._pause_for_joiners(session, 155))
+
+    snapshot = coordinator.get_join_decision.call_args.args[2]
+    assert snapshot.history == full_turn_log[:2]
+
+
+def test_pause_for_joiners_adds_joiners_atomically_without_last_spoke_entry() -> None:
+    """Accepted joiners update both rosters and join index without a last-spoke value."""
+
+    coordinator = Mock()
+
+    def _join_decision(
+        villager_id: str,
+        _description: str,
+        _snapshot: object,
+        _game_time: int,
+    ) -> bool:
+        """Return a deterministic join result per villager."""
+
+        return villager_id == "joiner"
+
+    coordinator.get_join_decision.side_effect = _join_decision
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        villager_states={
+            "joiner": _villager_state("joiner"),
+            "non_joiner": _villager_state("non_joiner"),
+        },
+    )
+    session = ConversationSession(
+        participant_ids=["initiator", "target"],
+        all_participant_ids=["initiator", "target"],
+        full_turn_log=[
+            ConversationTurn(villager_id="initiator", text="First."),
+            ConversationTurn(villager_id="target", text="Second."),
+        ],
+        join_turn_index={"initiator": 0, "target": 0},
+        elapsed_game_minutes=10,
+        last_spoke_turn={"initiator": 0, "target": 1},
+    )
+
+    asyncio.run(system._pause_for_joiners(session, 160))
+
+    assert session.participant_ids == ["initiator", "target", "joiner"]
+    assert session.all_participant_ids == ["initiator", "target", "joiner"]
+    assert session.join_turn_index["joiner"] == len(session.full_turn_log)
+    assert "joiner" not in session.last_spoke_turn
+    assert "non_joiner" not in session.participant_ids
+    assert "non_joiner" not in session.all_participant_ids
+
+
+def test_pause_for_joiners_keeps_all_parallel_joiners() -> None:
+    """All accepted joiners from one parallel batch are retained."""
+
+    coordinator = Mock()
+
+    async def _join_decision(
+        villager_id: str,
+        _description: str,
+        _snapshot: object,
+        _game_time: int,
+    ) -> bool:
+        """Yield once to exercise parallel join aggregation."""
+
+        await asyncio.sleep(0)
+        return villager_id in {"joiner_a", "joiner_b"}
+
+    coordinator.get_join_decision.side_effect = _join_decision
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        villager_states={
+            "joiner_a": _villager_state("joiner_a"),
+            "joiner_b": _villager_state("joiner_b"),
+        },
+    )
+    session = ConversationSession(
+        participant_ids=["initiator", "target"],
+        all_participant_ids=["initiator", "target"],
+        full_turn_log=[
+            ConversationTurn(villager_id="initiator", text="First."),
+            ConversationTurn(villager_id="target", text="Second."),
+        ],
+        join_turn_index={"initiator": 0, "target": 0},
+        elapsed_game_minutes=10,
+        last_spoke_turn={"initiator": 0, "target": 1},
+    )
+
+    asyncio.run(system._pause_for_joiners(session, 165))
+
+    assert session.participant_ids == ["initiator", "target", "joiner_a", "joiner_b"]
+    assert session.all_participant_ids == ["initiator", "target", "joiner_a", "joiner_b"]

@@ -11,12 +11,14 @@ from typing import Awaitable, Protocol, cast
 from character_canon.types import VillagerCanon, VillagerId as CanonVillagerId
 from conversation_system.types import ConversationSession
 from memory_system.types import EventLogEntry, EventType, VillagerId as MemoryVillagerId
+from villmage.game_types import ActionCategory
 from villmage.ai_coordinator.types import (
     ConvActionType,
     ConversationSnapshot,
     ConversationTurn,
     ConversationTurnResult,
 )
+from villmage.villager_state import VillagerState
 
 
 class _AICoordinatorProtocol(Protocol):
@@ -29,6 +31,15 @@ class _AICoordinatorProtocol(Protocol):
         game_time: int,
     ) -> ConversationTurnResult | Awaitable[ConversationTurnResult]:
         """Return one villager's conversation-turn decision."""
+
+    def get_join_decision(
+        self,
+        villager_id: str,
+        current_action_description: str,
+        snapshot: ConversationSnapshot,
+        game_time: int,
+    ) -> bool | Awaitable[bool]:
+        """Return whether one villager chooses to join an active conversation."""
 
 
 class _MemorySystemProtocol(Protocol):
@@ -102,18 +113,21 @@ class ConversationSystem:
     _ai_coordinator: _AICoordinatorProtocol | None
     _memory_system: _MemorySystemProtocol | None
     _canon: _CharacterCanonProtocol | None
+    _villager_states: dict[str, VillagerState] | None
 
     def __init__(
         self,
         ai_coordinator: _AICoordinatorProtocol | None = None,
         memory_system: _MemorySystemProtocol | None = None,
         canon: _CharacterCanonProtocol | None = None,
+        villager_states: dict[str, VillagerState] | None = None,
     ) -> None:
         """Store the conversation-system dependencies used during orchestration."""
 
         self._ai_coordinator = ai_coordinator
         self._memory_system = memory_system
         self._canon = canon
+        self._villager_states = villager_states
 
     def _select_winner(
         self,
@@ -241,11 +255,99 @@ class ConversationSystem:
             snapshot,
             game_time,
         )
-        if inspect.isawaitable(result_object):
-            result = await cast(Awaitable[ConversationTurnResult], result_object)
-        else:
-            result = cast(ConversationTurnResult, result_object)
+        result = cast(
+            ConversationTurnResult,
+            await self._resolve_maybe_awaitable(result_object),
+        )
         return (villager_id, result)
+
+    async def _pause_for_joiners(
+        self,
+        session: ConversationSession,
+        game_time: int,
+    ) -> None:
+        """Query eligible bystanders in parallel and atomically add all joiners."""
+
+        eligible_ids = self._eligible_joiner_ids(session)
+        if not eligible_ids:
+            return
+
+        snapshot = ConversationSnapshot(
+            participant_ids=list(session.participant_ids),
+            history=session.full_turn_log[:2],
+            elapsed_game_minutes=session.elapsed_game_minutes,
+        )
+        decision_pairs = await asyncio.gather(
+            *[
+                self._get_join_decision(villager_id, snapshot, game_time)
+                for villager_id in eligible_ids
+            ]
+        )
+        join_turn_index = len(session.full_turn_log)
+        joiner_ids = [
+            villager_id for villager_id, should_join in decision_pairs if should_join
+        ]
+        for villager_id in joiner_ids:
+            session.participant_ids.append(villager_id)
+            session.all_participant_ids.append(villager_id)
+            session.join_turn_index[villager_id] = join_turn_index
+
+    async def _get_join_decision(
+        self,
+        villager_id: str,
+        snapshot: ConversationSnapshot,
+        game_time: int,
+    ) -> tuple[str, bool]:
+        """Return one eligible villager's join decision."""
+
+        ai_coordinator = self._require_ai_coordinator()
+        decision_object = ai_coordinator.get_join_decision(
+            villager_id,
+            self._current_action_description(villager_id),
+            snapshot,
+            game_time,
+        )
+        decision = cast(bool, await self._resolve_maybe_awaitable(decision_object))
+        return (villager_id, decision)
+
+    def _eligible_joiner_ids(self, session: ConversationSession) -> list[str]:
+        """Return all current bystanders eligible for a turn-two join query."""
+
+        villager_states = self._require_villager_states()
+        return [
+            villager_id
+            for villager_id, villager_state in villager_states.items()
+            if self._can_query_joiner(villager_id, villager_state, session)
+        ]
+
+    def _can_query_joiner(
+        self,
+        villager_id: str,
+        villager_state: VillagerState,
+        session: ConversationSession,
+    ) -> bool:
+        """Return whether one villager meets the authored join-query filter."""
+
+        if villager_id in session.participant_ids or villager_state.wakefulness <= 0:
+            return False
+        current_action = villager_state.current_action
+        if current_action is None:
+            return True
+        return current_action.category not in {
+            ActionCategory.EXPLORING,
+            ActionCategory.HAULING,
+        }
+
+    def _current_action_description(self, villager_id: str) -> str:
+        """Return a prompt-ready description of one villager's current activity."""
+
+        villager_state = self._require_villager_states()[villager_id]
+        current_action = villager_state.current_action
+        if current_action is None:
+            return "idle at base"
+        if current_action.detail is not None:
+            return current_action.detail
+        return current_action.category.name.lower().replace("_", " ")
 
     def _write_turn_to_memory(
         self,
@@ -284,6 +386,21 @@ class ConversationSystem:
             return villager_id
         return canon.get_villager(CanonVillagerId(villager_id)).name
 
+    async def _resolve_maybe_awaitable(
+        self,
+        value: (
+            Awaitable[ConversationTurnResult]
+            | Awaitable[bool]
+            | ConversationTurnResult
+            | bool
+        ),
+    ) -> ConversationTurnResult | bool:
+        """Await asynchronous dependency results while preserving sync call support."""
+
+        if inspect.isawaitable(value):
+            return await cast(Awaitable[ConversationTurnResult | bool], value)
+        return cast(ConversationTurnResult | bool, value)
+
     def _require_ai_coordinator(self) -> _AICoordinatorProtocol:
         """Return the configured AI coordinator or fail fast."""
 
@@ -297,3 +414,10 @@ class ConversationSystem:
         if self._memory_system is None:
             raise RuntimeError("ConversationSystem requires memory_system.")
         return self._memory_system
+
+    def _require_villager_states(self) -> dict[str, VillagerState]:
+        """Return the configured villager-state map or fail fast."""
+
+        if self._villager_states is None:
+            raise RuntimeError("ConversationSystem requires villager_states.")
+        return self._villager_states
