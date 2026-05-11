@@ -117,3 +117,95 @@ class WorldState:
         if next_supply_ml < 0:
             raise ValueError("Water supply cannot be negative.")
         self.water_supply_ml = next_supply_ml
+
+    def _get_queued_fuel_minutes(self) -> int:
+        """Return the total burn minutes represented by the queued fuel."""
+
+        return sum(
+            unit.quantity * FUEL_BURN_DURATION_MINUTES[unit.fuel_type]
+            for unit in self.fire.fuel_queue
+        )
+
+    def _replace_fire(
+        self,
+        *,
+        lit: bool,
+        fuel_queue: tuple[FuelUnit, ...] | None = None,
+        extinction_timestamp: int | None,
+    ) -> None:
+        """Write a new fire snapshot while preserving unspecified queued fuel."""
+
+        next_queue = self.fire.fuel_queue if fuel_queue is None else fuel_queue
+        self.fire = Fire(
+            lit=lit,
+            fuel_queue=next_queue,
+            extinction_timestamp=extinction_timestamp,
+        )
+
+    def light_fire(self, current_time: int) -> int | None:
+        """Light the fire and derive its extinction timestamp from queued fuel."""
+
+        queued_minutes = self._get_queued_fuel_minutes()
+        extinction_timestamp = (
+            None if queued_minutes == 0 else current_time + queued_minutes
+        )
+        self._replace_fire(lit=True, extinction_timestamp=extinction_timestamp)
+        return extinction_timestamp
+
+    def extinguish_fire(self) -> None:
+        """Extinguish the fire without discarding queued fuel."""
+
+        self._replace_fire(lit=False, extinction_timestamp=None)
+
+    def mark_fire_extinguished(self) -> None:
+        """Mark scheduled fuel consumption complete and clear the queue."""
+
+        self._replace_fire(lit=False, fuel_queue=(), extinction_timestamp=None)
+
+    def add_fire_fuel(
+        self,
+        fuel_type: FuelType,
+        quantity: int,
+        current_time: int,
+    ) -> int | None:
+        """Append fuel, enforcing the four-hour cap and updating live burn time."""
+
+        added_minutes = quantity * FUEL_BURN_DURATION_MINUTES[fuel_type]
+        queued_minutes = self._get_queued_fuel_minutes()
+        if queued_minutes + added_minutes > 240:
+            raise ValueError("Fire fuel cannot exceed 240 remaining burn minutes.")
+
+        next_queue = self.fire.fuel_queue + (FuelUnit(fuel_type=fuel_type, quantity=quantity),)
+        if not self.fire.lit:
+            self._replace_fire(
+                lit=False,
+                fuel_queue=next_queue,
+                extinction_timestamp=None,
+            )
+            return None
+
+        current_extinction = self.fire.extinction_timestamp
+        if current_extinction is None:
+            current_extinction = current_time
+        next_extinction = current_extinction + added_minutes
+        self._replace_fire(
+            lit=True,
+            fuel_queue=next_queue,
+            extinction_timestamp=next_extinction,
+        )
+        return next_extinction
+
+    def is_fire_lit(self) -> bool:
+        """Return whether the fire is currently lit."""
+
+        return self.fire.lit
+
+    def get_remaining_fuel_minutes(self, current_time: int) -> int:
+        """Return live remaining fuel time or queued fuel time if unlit."""
+
+        if self.fire.lit:
+            extinction_timestamp = self.fire.extinction_timestamp
+            if extinction_timestamp is None:
+                return 0
+            return extinction_timestamp - current_time
+        return self._get_queued_fuel_minutes()

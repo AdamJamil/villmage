@@ -10,6 +10,7 @@ from villmage.world_state import (
     FUEL_BURN_DURATION_MINUTES,
     DirtinessSource,
     FuelType,
+    FuelUnit,
     WorldState,
     item_type_to_fuel_type,
 )
@@ -153,3 +154,231 @@ def test_storage_and_water_mutations_are_orthogonal() -> None:
 
     world_state.modify_water(20_000)
     assert world_state.get_base_item_count(ItemType.PEACH) == 5
+
+
+def assert_fire_timestamp_invariant(world_state: WorldState) -> None:
+    """Assert the fire timestamp matches the lit-and-non-empty queue invariant."""
+
+    has_timestamp = world_state.fire.extinction_timestamp is not None
+    has_queued_fuel = world_state.fire.fuel_queue != ()
+    assert has_timestamp is (world_state.fire.lit and has_queued_fuel)
+
+
+def test_light_fire_with_empty_queue_keeps_null_extinction_timestamp() -> None:
+    """Lighting an empty fire marks it lit but leaves no scheduled extinction."""
+
+    world_state = WorldState()
+
+    extinction_timestamp = world_state.light_fire(current_time=100)
+
+    assert world_state.is_fire_lit() is True
+    assert world_state.fire.extinction_timestamp is None
+    assert extinction_timestamp is None
+    assert_fire_timestamp_invariant(world_state)
+
+
+def test_light_fire_with_single_fuel_type_sets_extinction_timestamp() -> None:
+    """Lighting queued firewood schedules extinction from the current time."""
+
+    world_state = WorldState()
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 2, current_time=0)
+
+    extinction_timestamp = world_state.light_fire(current_time=100)
+
+    assert world_state.fire.extinction_timestamp == 140
+    assert extinction_timestamp == 140
+    assert_fire_timestamp_invariant(world_state)
+
+
+def test_light_fire_with_mixed_queue_sums_all_burn_minutes() -> None:
+    """Lighting mixed queued fuel uses the full queued burn duration."""
+
+    world_state = WorldState()
+    world_state.add_fire_fuel(FuelType.STICK, 3, current_time=0)
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 1, current_time=0)
+
+    extinction_timestamp = world_state.light_fire(current_time=0)
+
+    assert world_state.fire.extinction_timestamp == 23
+    assert extinction_timestamp == 23
+    assert_fire_timestamp_invariant(world_state)
+
+
+def test_extinguish_fire_preserves_queued_fuel() -> None:
+    """Manual extinguish clears runtime state but keeps queued fuel intact."""
+
+    world_state = WorldState()
+    world_state.add_fire_fuel(FuelType.STICK, 3, current_time=0)
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 1, current_time=0)
+    queued_fuel = world_state.fire.fuel_queue
+    world_state.light_fire(current_time=10)
+
+    world_state.extinguish_fire()
+
+    assert world_state.fire.lit is False
+    assert world_state.fire.extinction_timestamp is None
+    assert world_state.fire.fuel_queue == queued_fuel
+    assert_fire_timestamp_invariant(world_state)
+
+
+def test_mark_fire_extinguished_clears_queued_fuel() -> None:
+    """Scheduled extinguish consumes all queued fuel and resets fire state."""
+
+    world_state = WorldState()
+    world_state.add_fire_fuel(FuelType.STICK, 3, current_time=0)
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 1, current_time=0)
+    world_state.light_fire(current_time=10)
+
+    world_state.mark_fire_extinguished()
+
+    assert world_state.fire.lit is False
+    assert world_state.fire.extinction_timestamp is None
+    assert world_state.fire.fuel_queue == ()
+    assert_fire_timestamp_invariant(world_state)
+
+
+def test_add_fire_fuel_when_unlit_appends_queue_and_returns_none() -> None:
+    """Adding fuel to an unlit fire only mutates the queued fuel."""
+
+    world_state = WorldState()
+
+    extinction_timestamp = world_state.add_fire_fuel(
+        FuelType.STICK,
+        5,
+        current_time=0,
+    )
+
+    assert extinction_timestamp is None
+    assert world_state.fire.fuel_queue == (FuelUnit(FuelType.STICK, 5),)
+    assert_fire_timestamp_invariant(world_state)
+
+
+def test_add_fire_fuel_when_lit_extends_extinction_timestamp() -> None:
+    """Adding fuel to a lit fire extends the already scheduled extinction."""
+
+    world_state = WorldState()
+    world_state.add_fire_fuel(FuelType.STICK, 10, current_time=0)
+    world_state.light_fire(current_time=100)
+
+    extinction_timestamp = world_state.add_fire_fuel(
+        FuelType.FIREWOOD,
+        2,
+        current_time=100,
+    )
+
+    assert extinction_timestamp == 150
+    assert world_state.fire.extinction_timestamp == 150
+    assert_fire_timestamp_invariant(world_state)
+
+
+def test_add_fire_fuel_allows_exact_cap_and_rejects_overflow() -> None:
+    """Queued fuel may reach but not exceed the 240-minute cap."""
+
+    world_state = WorldState()
+
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 12, current_time=0)
+    assert world_state.get_remaining_fuel_minutes(current_time=0) == 240
+    assert_fire_timestamp_invariant(world_state)
+
+    with pytest.raises(ValueError):
+        world_state.add_fire_fuel(FuelType.STICK, 1, current_time=0)
+
+
+def test_add_fire_fuel_cap_counts_remaining_minutes_while_lit() -> None:
+    """The cap uses live remaining fuel time after the fire is lit."""
+
+    world_state = WorldState()
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 10, current_time=0)
+    world_state.light_fire(current_time=0)
+
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 2, current_time=0)
+    assert world_state.fire.extinction_timestamp == 240
+    assert_fire_timestamp_invariant(world_state)
+
+    with pytest.raises(ValueError):
+        world_state.add_fire_fuel(FuelType.STICK, 1, current_time=0)
+
+
+def test_is_fire_lit_tracks_state_transitions() -> None:
+    """The lit getter reflects lighting and both extinguish paths."""
+
+    world_state = WorldState()
+
+    assert world_state.is_fire_lit() is False
+
+    world_state.light_fire(current_time=0)
+    assert world_state.is_fire_lit() is True
+
+    world_state.extinguish_fire()
+    assert world_state.is_fire_lit() is False
+
+    world_state.light_fire(current_time=0)
+    world_state.mark_fire_extinguished()
+    assert world_state.is_fire_lit() is False
+
+
+def test_get_remaining_fuel_minutes_for_unlit_empty_queue_is_zero() -> None:
+    """An unlit fire with no queued fuel has zero remaining burn time."""
+
+    world_state = WorldState()
+
+    assert world_state.get_remaining_fuel_minutes(current_time=50) == 0
+
+
+def test_get_remaining_fuel_minutes_for_unlit_mixed_queue_sums_queue() -> None:
+    """An unlit fire reports the full queued burn duration."""
+
+    world_state = WorldState()
+    world_state.add_fire_fuel(FuelType.STICK, 3, current_time=0)
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 2, current_time=0)
+
+    assert world_state.get_remaining_fuel_minutes(current_time=50) == 43
+
+
+def test_get_remaining_fuel_minutes_for_lit_fire_uses_current_time() -> None:
+    """A lit fire reports time remaining until scheduled extinction."""
+
+    world_state = WorldState()
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 1, current_time=0)
+    world_state.add_fire_fuel(FuelType.STICK, 10, current_time=0)
+    world_state.light_fire(current_time=0)
+
+    assert world_state.get_remaining_fuel_minutes(current_time=10) == 20
+
+
+def test_fire_extinction_timestamp_invariant_after_each_transition() -> None:
+    """Every fire transition preserves the timestamp iff lit-and-fueled invariant."""
+
+    world_state = WorldState()
+
+    world_state.light_fire(current_time=0)
+    assert world_state.fire.extinction_timestamp is None
+    assert_fire_timestamp_invariant(world_state)
+
+    world_state.extinguish_fire()
+    assert world_state.fire.extinction_timestamp is None
+    assert_fire_timestamp_invariant(world_state)
+
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 1, current_time=0)
+    assert world_state.fire.extinction_timestamp is None
+    assert_fire_timestamp_invariant(world_state)
+
+    world_state.light_fire(current_time=10)
+    assert world_state.fire.extinction_timestamp == 30
+    assert_fire_timestamp_invariant(world_state)
+
+    world_state.add_fire_fuel(FuelType.STICK, 5, current_time=10)
+    assert world_state.fire.extinction_timestamp == 35
+    assert_fire_timestamp_invariant(world_state)
+
+    world_state.extinguish_fire()
+    assert world_state.fire.extinction_timestamp is None
+    assert_fire_timestamp_invariant(world_state)
+
+    world_state.light_fire(current_time=20)
+    assert world_state.fire.extinction_timestamp == 45
+    assert_fire_timestamp_invariant(world_state)
+
+    world_state.mark_fire_extinguished()
+    assert world_state.fire.extinction_timestamp is None
+    assert_fire_timestamp_invariant(world_state)
