@@ -4,8 +4,32 @@
 
 from __future__ import annotations
 
-from action_system.types import ActionContext, ActionType, ValidAction
-from villmage.game_types import ItemType, RestingSpotType
+from action_system.timing import exploration_effective_mean
+from action_system.types import (
+    ActionContext,
+    ActionType,
+    ExploreResource,
+    ValidAction,
+)
+from character_canon.types import Profession, VillagerId
+from villmage.game_types import ITEM_WEIGHT_G, ItemType, RestingSpotType
+
+
+_EXPLORATION_ITEM_BY_RESOURCE: dict[ExploreResource, ItemType] = {
+    ExploreResource.PEACHES: ItemType.PEACH,
+    ExploreResource.STICKS: ItemType.STICK,
+    ExploreResource.LEAVES: ItemType.LEAVES,
+    ExploreResource.LOGS: ItemType.LOG,
+    ExploreResource.BOAR: ItemType.CARCASS,
+}
+
+_ALL_EXPLORATION_RESOURCES: tuple[ExploreResource, ...] = (
+    ExploreResource.PEACHES,
+    ExploreResource.STICKS,
+    ExploreResource.LEAVES,
+    ExploreResource.LOGS,
+    ExploreResource.BOAR,
+)
 
 
 def _range_spec(argument_name: str, maximum: int) -> str:
@@ -20,6 +44,12 @@ def _item_name(item: ItemType) -> str:
     return item.name.lower().replace("_", " ")
 
 
+def _resource_name(resource: ExploreResource) -> str:
+    """Return one exploration resource as the lower-case prompt-facing label."""
+
+    return resource.name.lower()
+
+
 def _has_placed_spot(
     ctx: ActionContext,
     resting_spot_type: RestingSpotType,
@@ -29,6 +59,73 @@ def _has_placed_spot(
     return (
         ctx.ws.placed_resting_spots.get(ctx.villager_id) is resting_spot_type
         or ctx.vs.sleep_spot_claim is resting_spot_type
+    )
+
+
+def _villager_profession(ctx: ActionContext) -> Profession:
+    """Return the acting villager's authored profession."""
+
+    villager = ctx.canon.get_villager(VillagerId(ctx.villager_id))
+    return villager.profession
+
+
+def _current_inventory_weight_g(ctx: ActionContext) -> int:
+    """Return the total carried inventory weight in grams."""
+
+    return sum(
+        ITEM_WEIGHT_G[item] * quantity for item, quantity in ctx.vs.inventory.items()
+    )
+
+
+def _carry_capacity_g(ctx: ActionContext) -> int:
+    """Return the villager's current carrying capacity in grams."""
+
+    has_satchel = ctx.vs.inventory.get(ItemType.SATCHEL, 0) >= 1
+    return 40_000 + (30_000 if has_satchel else 0)
+
+
+def _can_access_resource(resource: ExploreResource, profession: Profession) -> bool:
+    """Return whether the resource should appear for this profession."""
+
+    if resource is ExploreResource.LOGS:
+        return profession is Profession.WOODCUTTER
+    if resource is ExploreResource.BOAR:
+        return profession is Profession.HUNTER
+    return True
+
+
+def _exploration_action(
+    ctx: ActionContext,
+    resource: ExploreResource,
+    profession: Profession,
+) -> ValidAction:
+    """Return one exploration entry for an accessible resource."""
+
+    item = _EXPLORATION_ITEM_BY_RESOURCE[resource]
+    remaining_capacity_g = _carry_capacity_g(ctx) - _current_inventory_weight_g(ctx)
+    effective_mean = exploration_effective_mean(
+        resource=resource,
+        profession=profession,
+        yield_scale=ctx.multipliers.exploration_yield_scale,
+    )
+    if remaining_capacity_g < ITEM_WEIGHT_G[item]:
+        return ValidAction(
+            action_type=ActionType.EXPLORE,
+            prompt_text=(
+                f"Explore for {_resource_name(resource)} "
+                f"({effective_mean:.1f} min/item) "
+                "(Cannot perform! No inventory space.)"
+            ),
+            selectable=False,
+        )
+    return ValidAction(
+        action_type=ActionType.EXPLORE,
+        prompt_text=(
+            f"Explore for {_resource_name(resource)} "
+            '{"duration_minutes": int (60-240)} '
+            f"({effective_mean:.1f} min/item)"
+        ),
+        selectable=True,
     )
 
 
@@ -111,6 +208,20 @@ def storage_actions(ctx: ActionContext) -> list[ValidAction]:
                     selectable=True,
                 )
             )
+
+    return actions
+
+
+def exploration_actions(ctx: ActionContext) -> list[ValidAction]:
+    """Return accessible exploration entries with prompt and capacity metadata."""
+
+    profession = _villager_profession(ctx)
+    actions: list[ValidAction] = []
+
+    for resource in _ALL_EXPLORATION_RESOURCES:
+        if not _can_access_resource(resource, profession):
+            continue
+        actions.append(_exploration_action(ctx, resource, profession))
 
     return actions
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from action_system.eligibility import (
     eating_and_drinking_actions,
+    exploration_actions,
     rest_action,
     resting_spot_actions,
     storage_actions,
@@ -17,10 +18,9 @@ from villmage.villager_state import VillagerState
 from villmage.world_state import WorldState
 
 
-def make_ctx() -> ActionContext:
-    """Build a minimal builder-villager action context for eligibility tests."""
+def make_ctx(villager_id: str = "harren") -> ActionContext:
+    """Build a minimal authored-villager action context for eligibility tests."""
 
-    villager_id = "harren"
     villager_state = VillagerState(villager_id)
     return ActionContext(
         villager_id=villager_id,
@@ -40,6 +40,20 @@ def _get_action(
 
     for action in actions:
         if action.action_type is action_type:
+            return action
+    return None
+
+
+def _get_exploration_action(
+    ctx: ActionContext,
+    resource_name: str,
+) -> ValidAction | None:
+    """Return the exploration entry for one prompt-facing resource label."""
+
+    for action in exploration_actions(ctx):
+        if action.action_type is not ActionType.EXPLORE:
+            continue
+        if f"Explore for {resource_name}" in action.prompt_text:
             return action
     return None
 
@@ -184,6 +198,138 @@ def test_storage_actions_return_one_action_per_distinct_item_in_each_group() -> 
 
     assert len(take_actions) == 2
     assert len(store_actions) == 2
+
+
+def test_exploration_actions_show_profession_free_resources_for_builder() -> None:
+    """Peaches, sticks, and leaves always appear for any profession."""
+
+    ctx = make_ctx("harren")
+
+    peaches = _get_exploration_action(ctx, "peaches")
+    sticks = _get_exploration_action(ctx, "sticks")
+    leaves = _get_exploration_action(ctx, "leaves")
+
+    assert peaches is not None
+    assert peaches.selectable is True
+    assert sticks is not None
+    assert sticks.selectable is True
+    assert leaves is not None
+    assert leaves.selectable is True
+
+
+def test_exploration_actions_show_logs_only_for_woodcutter() -> None:
+    """Logs are excluded entirely for non-woodcutters and present for woodcutters."""
+
+    for villager_id in ("harren", "sewalt", "thessia", "ivette", "maren"):
+        assert _get_exploration_action(make_ctx(villager_id), "logs") is None
+
+    logs = _get_exploration_action(make_ctx("aldric"), "logs")
+
+    assert logs is not None
+    assert logs.selectable is True
+
+
+def test_exploration_actions_show_boar_only_for_hunter() -> None:
+    """Boar is excluded entirely for non-hunters and present for hunters."""
+
+    for villager_id in ("harren", "aldric", "thessia", "ivette", "maren"):
+        assert _get_exploration_action(make_ctx(villager_id), "boar") is None
+
+    boar = _get_exploration_action(make_ctx("sewalt"), "boar")
+
+    assert boar is not None
+    assert boar.selectable is True
+
+
+def test_exploration_actions_show_non_gatherer_peach_penalty_in_prompt() -> None:
+    """Non-gatherers see the 4x peach mean time in the prompt."""
+
+    peaches = _get_exploration_action(make_ctx("harren"), "peaches")
+
+    assert peaches is not None
+    assert "40.0 min/item" in peaches.prompt_text
+
+
+def test_exploration_actions_show_gatherer_peach_mean_in_prompt() -> None:
+    """Gatherers see the unpenalized peach mean time in the prompt."""
+
+    peaches = _get_exploration_action(make_ctx("maren"), "peaches")
+
+    assert peaches is not None
+    assert "10.0 min/item" in peaches.prompt_text
+
+
+def test_exploration_actions_show_non_selectable_entry_with_no_space() -> None:
+    """No room for one peach keeps the entry visible but non-selectable."""
+
+    ctx = make_ctx("harren")
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    ctx.vs.modify_inventory(ItemType.LOG, 1)
+    ctx.vs.modify_inventory(ItemType.STICK, 20)
+
+    peaches = _get_exploration_action(ctx, "peaches")
+
+    assert peaches is not None
+    assert peaches.selectable is False
+    assert peaches.idx is None
+    assert "Cannot perform! No inventory space." in peaches.prompt_text
+
+
+def test_exploration_actions_are_selectable_with_exact_single_item_capacity() -> None:
+    """Exactly enough room for one peach still counts as selectable."""
+
+    ctx = make_ctx("harren")
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    ctx.vs.modify_inventory(ItemType.RAW_MEAT, 19)
+    ctx.vs.modify_inventory(ItemType.COOKED_MEAT, 1)
+
+    peaches = _get_exploration_action(ctx, "peaches")
+
+    assert peaches is not None
+    assert peaches.selectable is True
+
+
+def test_exploration_actions_respect_single_satchel_capacity_bonus() -> None:
+    """A satchel raises capacity to 70 kg, allowing sticks that otherwise do not fit."""
+
+    ctx = make_ctx("harren")
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    ctx.vs.modify_inventory(ItemType.STICK, 20)
+
+    sticks_without_satchel = _get_exploration_action(ctx, "sticks")
+
+    assert sticks_without_satchel is not None
+    assert sticks_without_satchel.selectable is False
+
+    ctx.vs.modify_inventory(ItemType.SATCHEL, 1)
+    sticks_with_satchel = _get_exploration_action(ctx, "sticks")
+
+    assert sticks_with_satchel is not None
+    assert sticks_with_satchel.selectable is True
+
+
+def test_exploration_actions_do_not_stack_multiple_satchels() -> None:
+    """Multiple satchels still cap carrying capacity at 70 kg."""
+
+    ctx = make_ctx("harren")
+    ctx.vs.modify_inventory(ItemType.SATCHEL, 2)
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    ctx.vs.modify_inventory(ItemType.LOG, 2)
+    ctx.vs.modify_inventory(ItemType.STICK, 68)
+
+    sticks = _get_exploration_action(ctx, "sticks")
+
+    assert sticks is not None
+    assert sticks.selectable is False
+
+
+def test_exploration_actions_show_duration_range_for_selectable_entries() -> None:
+    """Selectable exploration prompts include the authored duration range."""
+
+    peaches = _get_exploration_action(make_ctx("harren"), "peaches")
+
+    assert peaches is not None
+    assert '{"duration_minutes": int (60-240)}' in peaches.prompt_text
 
 
 def test_resting_spot_actions_returns_empty_with_no_spots_or_inventory() -> None:
