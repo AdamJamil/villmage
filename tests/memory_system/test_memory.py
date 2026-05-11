@@ -35,6 +35,16 @@ def _make_memory_system(
     )
 
 
+def _relationship_record(
+    memory_system: MemorySystem,
+    speaker_id: VillagerId,
+    subject_id: VillagerId,
+) -> RelationshipRecord:
+    """Return one directed relationship record from the memory system."""
+
+    return memory_system._relationships[speaker_id][subject_id]
+
+
 def test_init_builds_empty_per_villager_structures(tmp_path: Path) -> None:
     """Each villager starts with empty active and compacted memory lists."""
 
@@ -165,3 +175,159 @@ def test_append_thought_delegates_to_append_event_jsonl_path(tmp_path: Path) -> 
     assert parsed["game_time"] == 81
     assert parsed["type"] == EventType.THOUGHT.value
     assert parsed["text"] == "I trust Maren a little more now."
+
+
+def test_write_impressions_first_impression_preserves_default_description(
+    tmp_path: Path,
+) -> None:
+    """The first impression is stored while the default description remains intact."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+
+    memory_system.write_impressions(aldric, maren, "Shared watch duty.", None)
+
+    record = _relationship_record(memory_system, aldric, maren)
+    assert record.recent_impressions == ["Shared watch duty."]
+    assert record.description == _UNKNOWN_RELATIONSHIP_DESCRIPTION
+
+
+def test_write_impressions_keeps_up_to_three_in_insertion_order(tmp_path: Path) -> None:
+    """The queue preserves oldest-to-newest order while still below the cap."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+
+    memory_system.write_impressions(aldric, maren, "A", None)
+    memory_system.write_impressions(aldric, maren, "B", None)
+    memory_system.write_impressions(aldric, maren, "C", None)
+
+    assert _relationship_record(memory_system, aldric, maren).recent_impressions == [
+        "A",
+        "B",
+        "C",
+    ]
+
+
+def test_write_impressions_fourth_impression_drops_oldest_fifo(tmp_path: Path) -> None:
+    """Adding a fourth impression discards index zero rather than the newest entry."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+
+    for impression in ["A", "B", "C", "D"]:
+        memory_system.write_impressions(aldric, maren, impression, None)
+
+    assert _relationship_record(memory_system, aldric, maren).recent_impressions == [
+        "B",
+        "C",
+        "D",
+    ]
+
+
+def test_write_impressions_continues_fifo_on_successive_rollovers(tmp_path: Path) -> None:
+    """Repeated writes keep evicting the oldest entry while preserving chronology."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+
+    for impression in ["A", "B", "C", "D", "E"]:
+        memory_system.write_impressions(aldric, maren, impression, None)
+
+    assert _relationship_record(memory_system, aldric, maren).recent_impressions == [
+        "C",
+        "D",
+        "E",
+    ]
+
+    memory_system.write_impressions(aldric, maren, "F", None)
+
+    assert _relationship_record(memory_system, aldric, maren).recent_impressions == [
+        "D",
+        "E",
+        "F",
+    ]
+
+
+def test_write_impressions_none_desc_update_leaves_description_unchanged(
+    tmp_path: Path,
+) -> None:
+    """A missing description update never blocks the impression append."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+
+    for impression in ["A", "B", "C", "D"]:
+        memory_system.write_impressions(aldric, maren, impression, None)
+
+    record = _relationship_record(memory_system, aldric, maren)
+    assert record.recent_impressions == ["B", "C", "D"]
+    assert record.description == _UNKNOWN_RELATIONSHIP_DESCRIPTION
+
+
+def test_write_impressions_replaces_description_wholesale_when_provided(
+    tmp_path: Path,
+) -> None:
+    """A provided description update overwrites the previous description text."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+
+    memory_system.write_impressions(
+        aldric,
+        maren,
+        "Offered bread after the hunt.",
+        "Shared food with party.",
+    )
+
+    record = _relationship_record(memory_system, aldric, maren)
+    assert record.recent_impressions == ["Offered bread after the hunt."]
+    assert record.description == "Shared food with party."
+
+
+def test_write_impressions_updates_queue_and_description_independently(
+    tmp_path: Path,
+) -> None:
+    """One call can append a new impression and replace the description together."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+
+    for impression in ["A", "B", "C"]:
+        memory_system.write_impressions(aldric, maren, impression, None)
+
+    memory_system.write_impressions(
+        aldric,
+        maren,
+        "D",
+        "Stayed calm under pressure.",
+    )
+
+    record = _relationship_record(memory_system, aldric, maren)
+    assert record.recent_impressions == ["B", "C", "D"]
+    assert record.description == "Stayed calm under pressure."
+
+
+def test_write_impressions_isolated_by_ordered_pair(tmp_path: Path) -> None:
+    """Directed speaker-subject pairs maintain separate relationship records."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+
+    memory_system.write_impressions(aldric, maren, "imp1", None)
+    memory_system.write_impressions(maren, aldric, "imp2", None)
+
+    assert _relationship_record(memory_system, aldric, maren).recent_impressions == [
+        "imp1"
+    ]
+    assert _relationship_record(memory_system, maren, aldric).recent_impressions == [
+        "imp2"
+    ]

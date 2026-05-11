@@ -79,3 +79,19 @@ class MemorySystem:
             villager_id,
             EventLogEntry(game_time=game_time, type=EventType.THOUGHT, text=text),
         )
+
+    def write_impressions(
+        self,
+        speaker_id: VillagerId,
+        subject_id: VillagerId,
+        impression: str,
+        desc_update: str | None,
+    ) -> None:
+        """Append one impression and optionally replace the relationship description."""
+
+        relationship = self._relationships[speaker_id][subject_id]
+        relationship.recent_impressions.append(impression)
+        if len(relationship.recent_impressions) > 3:
+            relationship.recent_impressions.pop(0)
+        if desc_update is not None:
+            relationship.description = desc_update
