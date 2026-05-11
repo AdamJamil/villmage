@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from dataclasses import replace
 from enum import Enum
 from heapq import heapify, heappush
-from typing import Callable, Protocol
+from typing import Awaitable, Callable, Protocol, cast
 
 from character_canon.canon import CharacterCanon
 from conversation_system.conversation import ConversationSystem
@@ -28,6 +30,7 @@ from villmage.events import (
     VillagerId,
 )
 from villmage.game_types import ActionCategory
+from villmage.game_types import ItemType
 from villmage.villager_state import CurrentAction, DecayResult, VillagerState
 from villmage.world_state import WorldState
 
@@ -213,3 +216,76 @@ class SimulationEngine:
                     sequence=-1,
                 )
             )
+
+    @staticmethod
+    def _inventory_edible_calories(villager_state: VillagerState) -> int:
+        """Return the edible calories currently carried by one villager."""
+
+        peach_calories = villager_state.inventory.get(ItemType.PEACH, 0) * 60
+        cooked_meat_calories = (
+            villager_state.inventory.get(ItemType.COOKED_MEAT, 0) * 800
+        )
+        return peach_calories + cooked_meat_calories
+
+    @staticmethod
+    def _resolve_awaitable(result: object) -> object:
+        """Run one awaitable result to completion and otherwise return it unchanged."""
+
+        if inspect.isawaitable(result):
+            return asyncio.run(cast(Awaitable[object], result))
+        return result
+
+    def _compute_autobalance_aggregates(self) -> tuple[float, float, float]:
+        """Return average satiation, hydration, and food-safety aggregates."""
+
+        living_villagers = list(self.villager_states.values())
+        living_count = len(living_villagers)
+        if living_count == 0:
+            return (0.0, 0.0, 0.0)
+
+        shared_base_calories = self.world_state.get_total_edible_calories()
+        base_calorie_share = shared_base_calories / float(living_count)
+        total_satiation_pct = 0.0
+        total_hydration_pct = 0.0
+        total_food_safety_days = 0.0
+
+        for villager_state in living_villagers:
+            total_satiation_pct += villager_state.satiation / 1800.0
+            total_hydration_pct += villager_state.hydration / 6000.0
+            inventory_calories = self._inventory_edible_calories(villager_state)
+            total_food_safety_days += (
+                (inventory_calories / 2200.0) + (base_calorie_share / 2200.0)
+            ) / 5.0
+
+        return (
+            total_satiation_pct / float(living_count),
+            total_hydration_pct / float(living_count),
+            total_food_safety_days / float(living_count),
+        )
+
+    def _handle_midnight(self) -> None:
+        """Run the midnight autobalance and compaction cycle."""
+
+        threshold_crossings = self._apply_decay_all(0.0)
+        for villager_id, crossings in threshold_crossings.items():
+            self._apply_thresholds(villager_id, crossings)
+
+        avg_satiation_pct, avg_hydration_pct, avg_food_safety_days = (
+            self._compute_autobalance_aggregates()
+        )
+        self.autobalance.adjust(
+            avg_satiation_pct,
+            avg_hydration_pct,
+            avg_food_safety_days,
+        )
+        self._resolve_awaitable(
+            self.memory_system.trigger_midnight_compaction(
+                current_game_time=self.current_game_time
+            )
+        )
+        self._push(
+            MidnightEvent(
+                timestamp=self.current_game_time + 1440,
+                sequence=-1,
+            )
+        )
