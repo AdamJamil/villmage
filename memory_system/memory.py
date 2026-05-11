@@ -305,6 +305,11 @@ class MemorySystem:
             last_long_term_compaction_day=self._last_long_term_compaction_day,
         )
 
+    def get_full_state(self) -> MemorySnapshot:
+        """Return the full checkpointable memory snapshot."""
+
+        return self.trigger_snapshot()
+
     @classmethod
     def from_snapshot(
         cls,

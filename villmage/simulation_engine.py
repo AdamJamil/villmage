@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+from pathlib import Path
 from dataclasses import replace
 from enum import Enum
 from heapq import heapify, heappush
@@ -17,7 +19,21 @@ from memory_system.memory import MemorySystem
 from memory_system.types import (
     EventLogEntry,
     EventType,
+    MemorySnapshot,
     VillagerId as MemoryVillagerId,
+)
+from observability.types import (
+    VillagerMemoryCheckpoint,
+    _autobalance_from_dict,
+    _autobalance_to_dict,
+    _require_dict,
+    _require_list,
+    _scheduled_event_from_dict,
+    _scheduled_event_to_dict,
+    _villager_state_from_dict,
+    _villager_state_to_dict,
+    _world_state_from_dict,
+    _world_state_to_dict,
 )
 from villmage.ai_coordinator.coordinator import AICoordinator
 from villmage.autobalance import AutobalanceMultipliers
@@ -46,6 +62,98 @@ class CrossingType(Enum):
     WAKEFULNESS_ZERO = 2
 
 
+class _CheckpointDependencyPlaceholder:
+    """Raise a clear error if an unloaded runtime dependency is used."""
+
+    def __init__(self, dependency_name: str) -> None:
+        """Store the missing dependency's stable display name."""
+
+        self._dependency_name = dependency_name
+
+    def __getattr__(self, attribute_name: str) -> object:
+        """Reject runtime use until the dependency is reattached explicitly."""
+
+        raise RuntimeError(
+            f"{self._dependency_name}.{attribute_name} is unavailable on a "
+            "checkpoint-loaded SimulationEngine."
+        )
+
+
+class _CheckpointMemorySystem:
+    """Hold restored memory state when a full MemorySystem cannot be rebuilt."""
+
+    def __init__(self, snapshot: MemorySnapshot) -> None:
+        """Store the full checkpoint-restored memory snapshot."""
+
+        self._snapshot = snapshot
+
+    def trigger_snapshot(self) -> MemorySnapshot:
+        """Return the stored checkpoint snapshot."""
+
+        return self._snapshot
+
+    def get_full_state(self) -> MemorySnapshot:
+        """Return the stored checkpoint snapshot."""
+
+        return self._snapshot
+
+
+def _memory_snapshot_to_checkpoints(
+    snapshot: MemorySnapshot,
+) -> list[VillagerMemoryCheckpoint]:
+    """Convert one in-memory memory snapshot into checkpoint rows."""
+
+    return [
+        VillagerMemoryCheckpoint(
+            villager_id=str(villager_id),
+            short_term_memories=list(snapshot.short_term_memories.get(villager_id, [])),
+            medium_term_memories=list(snapshot.medium_term_memories.get(villager_id, [])),
+            long_term_memories=list(snapshot.long_term_memories.get(villager_id, [])),
+            active_context_log=list(snapshot.active_context_log.get(villager_id, [])),
+            relationships=dict(snapshot.relationships.get(villager_id, {})),
+            last_long_term_compaction_day=snapshot.last_long_term_compaction_day,
+        )
+        for villager_id in snapshot.active_context_log
+    ]
+
+
+def _memory_snapshot_from_checkpoints(
+    checkpoints: list[VillagerMemoryCheckpoint],
+) -> MemorySnapshot:
+    """Convert persisted per-villager memory rows into one typed snapshot."""
+
+    return MemorySnapshot(
+        active_context_log={
+            MemoryVillagerId(checkpoint.villager_id): list(checkpoint.active_context_log)
+            for checkpoint in checkpoints
+        },
+        short_term_memories={
+            MemoryVillagerId(checkpoint.villager_id): list(checkpoint.short_term_memories)
+            for checkpoint in checkpoints
+        },
+        medium_term_memories={
+            MemoryVillagerId(checkpoint.villager_id): list(checkpoint.medium_term_memories)
+            for checkpoint in checkpoints
+        },
+        long_term_memories={
+            MemoryVillagerId(checkpoint.villager_id): list(checkpoint.long_term_memories)
+            for checkpoint in checkpoints
+        },
+        relationships={
+            MemoryVillagerId(checkpoint.villager_id): {
+                MemoryVillagerId(subject_id): record
+                for subject_id, record in checkpoint.relationships.items()
+            }
+            for checkpoint in checkpoints
+        },
+        last_long_term_compaction_day=(
+            -1
+            if len(checkpoints) == 0
+            else checkpoints[0].last_long_term_compaction_day
+        ),
+    )
+
+
 class SimulationEngine:
     """Own startup simulation state plus event-heap helpers."""
 
@@ -60,6 +168,7 @@ class SimulationEngine:
     conversation_system: ConversationSystem
     memory_system: MemorySystem
     character_canon: CharacterCanon
+    checkpoint_dir: Path
 
     def __init__(
         self,
@@ -80,6 +189,7 @@ class SimulationEngine:
         self.conversation_system = conversation_system
         self.memory_system = memory_system
         self.autobalance = AutobalanceMultipliers()
+        self.checkpoint_dir = Path("checkpoints")
         self.villager_states = {
             str(villager.id): VillagerState(str(villager.id))
             for villager in self.character_canon.get_all_villagers()
@@ -289,3 +399,98 @@ class SimulationEngine:
                 sequence=-1,
             )
         )
+
+    def _handle_checkpoint(self) -> None:
+        """Persist one full engine snapshot and schedule the next checkpoint."""
+
+        self._cancel(
+            lambda event: isinstance(event, CheckpointEvent)
+            and event.timestamp == self.current_game_time
+        )
+        memory_snapshot = self.memory_system.get_full_state()
+        payload = {
+            "villager_states": [
+                _villager_state_to_dict(state)
+                for state in self.villager_states.values()
+            ],
+            "world_state": _world_state_to_dict(self.world_state),
+            "memory_state": [
+                checkpoint.to_dict()
+                for checkpoint in _memory_snapshot_to_checkpoints(memory_snapshot)
+            ],
+            "autobalance": _autobalance_to_dict(self.autobalance),
+            "event_heap": [
+                _scheduled_event_to_dict(event) for event in self.event_heap
+            ],
+            "current_game_time": self.current_game_time,
+        }
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = self.checkpoint_dir / f"{self.current_game_time}.json"
+        with checkpoint_path.open("w", encoding="utf-8") as checkpoint_file:
+            json.dump(payload, checkpoint_file, indent=2, sort_keys=True)
+            checkpoint_file.write("\n")
+        self._push(
+            CheckpointEvent(
+                timestamp=self.current_game_time + 180,
+                sequence=-1,
+            )
+        )
+
+    @classmethod
+    def load_checkpoint(cls, path: Path) -> SimulationEngine:
+        """Reconstruct one engine shell from a checkpoint file."""
+
+        with path.open("r", encoding="utf-8") as checkpoint_file:
+            data = _require_dict(json.load(checkpoint_file))
+
+        engine = cls.__new__(cls)
+        engine.current_game_time = int(data["current_game_time"])
+        engine.event_heap = [
+            _scheduled_event_from_dict(_require_dict(event))
+            for event in _require_list(data["event_heap"])
+        ]
+        heapify(engine.event_heap)
+        engine.next_sequence = (
+            0 if len(engine.event_heap) == 0 else max(event.sequence for event in engine.event_heap) + 1
+        )
+        engine.autobalance = _autobalance_from_dict(_require_dict(data["autobalance"]))
+        engine.villager_states = {
+            state.villager_id: state
+            for state in [
+                _villager_state_from_dict(_require_dict(raw_state))
+                for raw_state in _require_list(data["villager_states"])
+            ]
+        }
+        engine.world_state = _world_state_from_dict(_require_dict(data["world_state"]))
+        memory_snapshot = _memory_snapshot_from_checkpoints(
+            [
+                VillagerMemoryCheckpoint.from_dict(_require_dict(raw_state))
+                for raw_state in _require_list(data["memory_state"])
+            ]
+        )
+        engine.memory_system = cast(
+            MemorySystem,
+            _CheckpointMemorySystem(memory_snapshot),
+        )
+        engine.character_canon = CharacterCanon()
+        engine.action_system = cast(
+            _ActionSystemProtocol,
+            _CheckpointDependencyPlaceholder("action_system"),
+        )
+        engine.ai_coordinator = cast(
+            AICoordinator,
+            _CheckpointDependencyPlaceholder("ai_coordinator"),
+        )
+        engine.conversation_system = cast(
+            ConversationSystem,
+            _CheckpointDependencyPlaceholder("conversation_system"),
+        )
+        engine.checkpoint_dir = path.parent
+        if not any(isinstance(event, CheckpointEvent) for event in engine.event_heap):
+            engine._push(
+                CheckpointEvent(
+                    timestamp=engine.current_game_time + 180,
+                    sequence=-1,
+                )
+            )
+        return engine
