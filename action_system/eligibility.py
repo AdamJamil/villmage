@@ -4,15 +4,24 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from action_system.timing import exploration_effective_mean
 from action_system.types import (
     ActionContext,
+    ActionList,
     ActionType,
     ExploreResource,
     ValidAction,
 )
 from character_canon.types import Profession, VillagerId
-from villmage.game_types import CraftableItem, ITEM_WEIGHT_G, ItemType, RestingSpotType
+from villmage.game_types import (
+    ActionCategory,
+    CraftableItem,
+    ITEM_WEIGHT_G,
+    ItemType,
+    RestingSpotType,
+)
 from villmage.world_state import FUEL_BURN_DURATION_MINUTES, item_type_to_fuel_type
 
 
@@ -551,3 +560,130 @@ def cooking_actions(ctx: ActionContext) -> list[ValidAction]:
             selectable=fire_lit,
         )
     ]
+
+
+def sleeping_actions(ctx: ActionContext) -> list[ValidAction]:
+    """Return the always-available authored sleeping action."""
+
+    del ctx
+    return [
+        ValidAction(
+            action_type=ActionType.GO_TO_SLEEP,
+            prompt_text='Go to sleep {"hours": int (4-12)}',
+            selectable=True,
+        )
+    ]
+
+
+def washing_action(ctx: ActionContext) -> list[ValidAction]:
+    """Return the wash-up action when the base has enough water."""
+
+    if ctx.ws.water_supply_ml < 500:
+        return []
+    return [
+        ValidAction(
+            action_type=ActionType.WASH_UP,
+            prompt_text="Wash up (500 mL water)",
+            selectable=True,
+        )
+    ]
+
+
+def _can_talk_to_villager(villager_id: str, ctx: ActionContext) -> bool:
+    """Return whether one other living villager is available for conversation."""
+
+    if villager_id == ctx.villager_id:
+        return False
+    other_state = ctx.all_states.get(villager_id)
+    if other_state is None or other_state.wakefulness <= 0:
+        return False
+    current_action = other_state.current_action
+    if current_action is None:
+        return True
+    return current_action.category not in {
+        ActionCategory.EXPLORING,
+        ActionCategory.HAULING,
+    }
+
+
+def conversation_actions(ctx: ActionContext) -> list[ValidAction]:
+    """Return one talk-to action for each other villager available at base."""
+
+    actions: list[ValidAction] = []
+    for villager in ctx.canon.get_all_villagers():
+        villager_id = str(villager.id)
+        if not _can_talk_to_villager(villager_id, ctx):
+            continue
+        actions.append(
+            ValidAction(
+                action_type=ActionType.TALK_TO,
+                prompt_text=f'Talk to {villager.name} {{"target_villager_id": "{villager_id}"}}',
+                selectable=True,
+            )
+        )
+    return actions
+
+
+def _with_idx(action: ValidAction, idx: int | None) -> ValidAction:
+    """Return one action entry with the requested menu index."""
+
+    return replace(action, idx=idx)
+
+
+def _assign_indices(
+    main_actions: list[ValidAction],
+    crafter_recipes: list[ValidAction],
+) -> ActionList:
+    """Return an action list with globally sequential indices on selectable entries."""
+
+    next_idx = 1
+    indexed_main_actions: list[ValidAction] = []
+    indexed_crafter_recipes: list[ValidAction] = []
+
+    for action in main_actions:
+        if action.selectable:
+            indexed_main_actions.append(_with_idx(action, next_idx))
+            next_idx += 1
+        else:
+            indexed_main_actions.append(_with_idx(action, None))
+
+    for action in crafter_recipes:
+        if action.selectable:
+            indexed_crafter_recipes.append(_with_idx(action, next_idx))
+            next_idx += 1
+        else:
+            indexed_crafter_recipes.append(_with_idx(action, None))
+
+    return ActionList(
+        main_actions=tuple(indexed_main_actions),
+        crafter_recipes=tuple(indexed_crafter_recipes),
+    )
+
+
+def build_action_list(ctx: ActionContext) -> ActionList:
+    """Assemble the full action menu, split recipes, and assign global indices."""
+
+    main_actions: list[ValidAction] = []
+    crafter_recipes: list[ValidAction] = []
+
+    for action_group in (
+        eating_and_drinking_actions(ctx),
+        storage_actions(ctx),
+        resting_spot_actions(ctx),
+        exploration_actions(ctx),
+        rest_action(ctx),
+        fire_tending_actions(ctx),
+        misc_actions(ctx),
+        crafting_actions(ctx),
+        cooking_actions(ctx),
+        sleeping_actions(ctx),
+        washing_action(ctx),
+        conversation_actions(ctx),
+    ):
+        for action in action_group:
+            if action.action_type is ActionType.CRAFT_NEW:
+                crafter_recipes.append(action)
+            else:
+                main_actions.append(action)
+
+    return _assign_indices(main_actions, crafter_recipes)

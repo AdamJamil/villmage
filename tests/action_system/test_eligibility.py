@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 from action_system.eligibility import (
+    build_action_list,
     cooking_actions,
+    conversation_actions,
     crafting_actions,
     eating_and_drinking_actions,
     exploration_actions,
@@ -13,12 +15,14 @@ from action_system.eligibility import (
     misc_actions,
     rest_action,
     resting_spot_actions,
+    sleeping_actions,
     storage_actions,
+    washing_action,
 )
 from action_system.types import ActionContext, ActionType, AutobalanceMultipliers, ValidAction
 from character_canon.canon import CharacterCanon
-from villmage.game_types import CraftableItem, ItemType, RestingSpotType
-from villmage.villager_state import CraftingProgress, VillagerState
+from villmage.game_types import ActionCategory, CraftableItem, ItemType, RestingSpotType
+from villmage.villager_state import CraftingProgress, CurrentAction, VillagerState
 from villmage.world_state import DirtinessSource, FuelType, WorldState
 
 
@@ -75,6 +79,19 @@ def _get_action_with_text(
     return None
 
 
+def _current_action(category: ActionCategory) -> CurrentAction:
+    """Build one minimal current-action snapshot for eligibility tests."""
+
+    return CurrentAction(category=category, detail=None, completion_timestamp=0)
+
+
+def _all_actions_with_indices(ctx: ActionContext) -> tuple[ValidAction, ...]:
+    """Return the full built action menu flattened in render order."""
+
+    action_list = build_action_list(ctx)
+    return action_list.main_actions + action_list.crafter_recipes
+
+
 def test_rest_action_is_always_present() -> None:
     """Rest is always available as one selectable action."""
 
@@ -83,6 +100,124 @@ def test_rest_action_is_always_present() -> None:
     assert len(actions) == 1
     assert actions[0].action_type is ActionType.REST
     assert actions[0].selectable is True
+
+
+def test_sleeping_actions_is_always_present() -> None:
+    """Go-to-sleep always appears with the authored hours range."""
+
+    actions = sleeping_actions(make_ctx())
+
+    assert len(actions) == 1
+    assert actions[0].action_type is ActionType.GO_TO_SLEEP
+    assert actions[0].selectable is True
+    assert "4-12" in actions[0].prompt_text
+
+
+def test_washing_action_returns_empty_below_threshold() -> None:
+    """Wash up is hidden when available water is below 500 mL."""
+
+    ctx = make_ctx()
+    ctx.ws.water_supply_ml = 499
+
+    assert washing_action(ctx) == []
+
+
+def test_washing_action_is_present_at_threshold() -> None:
+    """Exactly 500 mL is enough to make wash up selectable."""
+
+    ctx = make_ctx()
+    ctx.ws.water_supply_ml = 500
+
+    actions = washing_action(ctx)
+
+    assert len(actions) == 1
+    assert actions[0].action_type is ActionType.WASH_UP
+    assert actions[0].selectable is True
+
+
+def test_conversation_actions_returns_empty_without_other_villagers() -> None:
+    """No other living villagers means no talk-to actions."""
+
+    ctx = make_ctx()
+    ctx.all_states.clear()
+
+    assert conversation_actions(ctx) == []
+
+
+def test_conversation_actions_include_other_villager_at_base_and_awake() -> None:
+    """Other villagers at base and awake are valid conversation targets."""
+
+    ctx = make_ctx()
+    other_state = VillagerState("sewalt")
+    other_state.wakefulness = 50
+    other_state.set_current_action(_current_action(ActionCategory.RESTING))
+    ctx.all_states["sewalt"] = other_state
+
+    talk_to = _get_action(conversation_actions(ctx), ActionType.TALK_TO)
+
+    assert talk_to is not None
+    assert "sewalt" in talk_to.prompt_text
+
+
+def test_conversation_actions_exclude_sleeping_other_villager() -> None:
+    """Sleeping villagers cannot participate in conversation."""
+
+    ctx = make_ctx()
+    other_state = VillagerState("sewalt")
+    other_state.wakefulness = 0
+    ctx.all_states["sewalt"] = other_state
+
+    assert conversation_actions(ctx) == []
+
+
+def test_conversation_actions_exclude_other_villager_who_is_exploring() -> None:
+    """Exploring villagers count as away from base."""
+
+    ctx = make_ctx()
+    other_state = VillagerState("sewalt")
+    other_state.wakefulness = 50
+    other_state.set_current_action(_current_action(ActionCategory.EXPLORING))
+    ctx.all_states["sewalt"] = other_state
+
+    assert conversation_actions(ctx) == []
+
+
+def test_conversation_actions_exclude_other_villager_who_is_hauling() -> None:
+    """Hauling villagers also count as away from base."""
+
+    ctx = make_ctx()
+    other_state = VillagerState("sewalt")
+    other_state.wakefulness = 50
+    other_state.set_current_action(_current_action(ActionCategory.HAULING))
+    ctx.all_states["sewalt"] = other_state
+
+    assert conversation_actions(ctx) == []
+
+
+def test_conversation_actions_include_only_available_villagers() -> None:
+    """Only other villagers who are both awake and at base appear."""
+
+    ctx = make_ctx()
+
+    awake_at_base = VillagerState("sewalt")
+    awake_at_base.wakefulness = 50
+    awake_at_base.set_current_action(_current_action(ActionCategory.RESTING))
+
+    exploring = VillagerState("aldric")
+    exploring.wakefulness = 50
+    exploring.set_current_action(_current_action(ActionCategory.EXPLORING))
+
+    sleeping = VillagerState("maren")
+    sleeping.wakefulness = 0
+
+    ctx.all_states["sewalt"] = awake_at_base
+    ctx.all_states["aldric"] = exploring
+    ctx.all_states["maren"] = sleeping
+
+    actions = conversation_actions(ctx)
+
+    assert len(actions) == 1
+    assert "sewalt" in actions[0].prompt_text
 
 
 def test_eating_and_drinking_actions_returns_empty_with_no_food_or_water() -> None:
@@ -746,3 +881,116 @@ def test_cooking_actions_show_non_selectable_finish_cooking_when_fire_is_still_o
 
     assert finish_cooking is not None
     assert finish_cooking.selectable is False
+
+
+def test_build_action_list_assigns_sequential_indices_across_main_and_crafter_sections() -> None:
+    """Selectable entries use one contiguous 1-based index space across both sections."""
+
+    ctx = make_ctx("ivette")
+    ctx.vs.modify_inventory(ItemType.PEACH, 2)
+    ctx.vs.modify_inventory(ItemType.RAW_HIDE, 1)
+    ctx.vs.modify_inventory(ItemType.LOG, 5)
+    ctx.vs.modify_inventory(ItemType.STICK, 25)
+    ctx.vs.modify_inventory(ItemType.PROCESSED_HIDE, 4)
+    ctx.vs.modify_inventory(ItemType.LEAVES, 400)
+    ctx.ws.water_supply_ml = 5000
+    ctx.ws.modify_base_item(ItemType.FIREWOOD, 2)
+
+    action_list = build_action_list(ctx)
+    selectable_actions = [
+        action
+        for action in action_list.main_actions + action_list.crafter_recipes
+        if action.selectable
+    ]
+    non_selectable_actions = [
+        action
+        for action in action_list.main_actions + action_list.crafter_recipes
+        if not action.selectable
+    ]
+
+    assert [action.idx for action in selectable_actions] == list(
+        range(1, len(selectable_actions) + 1)
+    )
+    assert all(action.idx is None for action in non_selectable_actions)
+
+
+def test_build_action_list_leaves_non_selectable_entries_unindexed() -> None:
+    """Disabled entries keep idx=None while surrounding selectable entries stay contiguous."""
+
+    ctx = make_ctx("ivette")
+    ctx.vs.modify_inventory(ItemType.CARCASS, 1)
+    ctx.vs.modify_inventory(ItemType.LOG, 1)
+    ctx.vs.modify_inventory(ItemType.STICK, 20)
+    ctx.vs.modify_inventory(ItemType.PROCESSED_HIDE, 1)
+
+    action_list = build_action_list(ctx)
+    selectable_idxs = [
+        action.idx
+        for action in action_list.main_actions + action_list.crafter_recipes
+        if action.selectable
+    ]
+    non_selectable_actions = [
+        action
+        for action in action_list.main_actions + action_list.crafter_recipes
+        if not action.selectable
+    ]
+    non_selectable_exploration = [
+        action
+        for action in action_list.main_actions
+        if action.action_type is ActionType.EXPLORE and not action.selectable
+    ]
+
+    assert len(non_selectable_exploration) > 0
+    assert all(action.idx is None for action in non_selectable_actions)
+    assert selectable_idxs == list(range(1, len(selectable_idxs) + 1))
+
+
+def test_build_action_list_places_crafter_recipes_in_separate_section() -> None:
+    """New crafting recipes live only in the crafter-recipes section."""
+
+    action_list = build_action_list(make_ctx("ivette"))
+
+    assert all(action.action_type is ActionType.CRAFT_NEW for action in action_list.crafter_recipes)
+    assert all(action.action_type is not ActionType.CRAFT_NEW for action in action_list.main_actions)
+
+
+def test_build_action_list_keeps_continue_crafting_in_main_section() -> None:
+    """Continue crafting is a main action, not a crafter-recipe entry."""
+
+    ctx = make_ctx("ivette")
+    ctx.vs.set_crafting_state(
+        CraftingProgress(item=CraftableItem.SATCHEL, minutes_spent=120)
+    )
+
+    action_list = build_action_list(ctx)
+
+    assert any(
+        action.action_type is ActionType.CONTINUE_CRAFTING
+        for action in action_list.main_actions
+    )
+    assert not any(
+        action.action_type is ActionType.CONTINUE_CRAFTING
+        for action in action_list.crafter_recipes
+    )
+
+
+def test_build_action_list_indices_are_globally_unique_without_gaps() -> None:
+    """All selectable menu indices are unique and cover the full contiguous range."""
+
+    ctx = make_ctx("ivette")
+    ctx.vs.modify_inventory(ItemType.PEACH, 1)
+    ctx.vs.modify_inventory(ItemType.PROCESSED_HIDE, 4)
+    ctx.vs.modify_inventory(ItemType.LEAVES, 400)
+    ctx.vs.modify_inventory(ItemType.STICK, 25)
+    ctx.vs.modify_inventory(ItemType.LOG, 5)
+    ctx.ws.water_supply_ml = 500
+    ctx.ws.modify_base_item(ItemType.FIREWOOD, 1)
+
+    idxs = [
+        action.idx
+        for action in _all_actions_with_indices(ctx)
+        if action.idx is not None
+    ]
+
+    assert len(idxs) == len(set(idxs))
+    assert set(idxs) == set(range(1, len(idxs) + 1))
