@@ -17,6 +17,7 @@ from character_canon.canon import CharacterCanon
 from conversation_system.conversation import ConversationSystem
 from memory_system.memory import MemorySystem
 from memory_system.types import (
+    CompactionReason,
     EventLogEntry,
     EventType,
     MemorySnapshot,
@@ -46,14 +47,20 @@ from villmage.events import (
     ScheduledEvent,
     VillagerId,
 )
-from villmage.game_types import ActionCategory
-from villmage.game_types import ItemType
+from villmage.game_types import ActionCategory, ItemType
+from action_system.types import ActionType, SelectedAction
 from villmage.villager_state import CurrentAction, DecayResult, VillagerState
 from villmage.world_state import WorldState
 
 
 class _ActionSystemProtocol(Protocol):
-    """Marker protocol for the action-system API reference owned by the engine."""
+    """Action-system surface needed by the simulation engine."""
+
+    def complete_action(self, villager_id: VillagerId) -> None:
+        """Apply completion effects for the villager's current action."""
+
+    def start_action(self, villager_id: VillagerId, action: SelectedAction) -> int:
+        """Start one action and return its completion timestamp."""
 
 
 class _SleepAdjustingActionSystemProtocol(Protocol):
@@ -366,6 +373,95 @@ class SimulationEngine:
             text=f"Carcass {event.carcass_id} rotted away.",
         )
         self._append_base_awake_event(rot_event)
+
+    def _trigger_short_term_compaction(
+        self,
+        villager_id: VillagerId,
+        reason: CompactionReason,
+    ) -> None:
+        """Run one per-villager short-term compaction to completion."""
+
+        self._resolve_awaitable(
+            self.memory_system.trigger_short_term_compaction(
+                MemoryVillagerId(villager_id),
+                self.current_game_time,
+                reason,
+            )
+        )
+
+    def _handle_action_complete(
+        self,
+        event: ActionCompleteEvent,
+        crossings: list[CrossingType] | None = None,
+    ) -> None:
+        """Complete the prior action, compact memory if needed, and start the next."""
+
+        villager_id = event.villager_id
+        villager_state = self.villager_states.get(villager_id)
+        if villager_state is None:
+            return
+
+        if villager_state.current_action is not None:
+            self.action_system.complete_action(villager_id)
+
+        effective_crossings = [] if crossings is None else crossings
+        if self._apply_thresholds(villager_id, effective_crossings):
+            return
+
+        compaction_ran = False
+        if villager_state.awake_minutes_since_compaction >= 240:
+            self._trigger_short_term_compaction(
+                villager_id,
+                CompactionReason.AWAKE_THRESHOLD,
+            )
+            villager_state.reset_compaction_counter()
+            compaction_ran = True
+
+        selection = self.ai_coordinator.select_action(
+            villager_id,
+            self.current_game_time,
+        )
+        if selection.thought is not None:
+            self.memory_system.append_thought(
+                MemoryVillagerId(villager_id),
+                self.current_game_time,
+                selection.thought,
+            )
+
+        if (
+            selection.action.action_type is ActionType.GO_TO_SLEEP
+            and not compaction_ran
+        ):
+            self._trigger_short_term_compaction(villager_id, CompactionReason.SLEEP)
+
+        target_id = selection.action.target_villager_id
+        if selection.action.action_type is ActionType.TALK_TO:
+            if target_id is None:
+                raise ValueError("Talk-to action requires target_villager_id.")
+            self._handle_conversation_action(villager_id, target_id)
+            return
+
+        completion_timestamp = self.action_system.start_action(
+            villager_id,
+            selection.action,
+        )
+        self._push(
+            ActionCompleteEvent(
+                timestamp=completion_timestamp,
+                sequence=-1,
+                villager_id=villager_id,
+            )
+        )
+
+    def _handle_conversation_action(
+        self,
+        initiator_id: VillagerId,
+        target_id: VillagerId,
+    ) -> None:
+        """Run the authored conversation branch once it is implemented."""
+
+        del initiator_id, target_id
+        raise NotImplementedError("Conversation handling is implemented in the next diff.")
 
     @staticmethod
     def _inventory_edible_calories(villager_state: VillagerState) -> int:
