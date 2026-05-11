@@ -62,3 +62,94 @@ def test_world_state_starts_with_empty_spec_defined_state() -> None:
     assert world_state.placed_resting_spots == {}
     assert world_state.live_carcasses == []
     assert world_state.next_carcass_id == 1
+
+
+@pytest.mark.parametrize("item_type", [ItemType.PEACH, ItemType.LOG, ItemType.CARCASS])
+def test_get_base_item_count_returns_zero_for_absent_items(item_type: ItemType) -> None:
+    """Absent storage entries read back as zero."""
+
+    world_state = WorldState()
+
+    assert world_state.get_base_item_count(item_type) == 0
+
+
+def test_modify_base_item_accumulates_positive_and_negative_deltas() -> None:
+    """Base storage applies signed deltas to the existing item count."""
+
+    world_state = WorldState()
+
+    world_state.modify_base_item(ItemType.PEACH, 5)
+    assert world_state.get_base_item_count(ItemType.PEACH) == 5
+
+    world_state.modify_base_item(ItemType.PEACH, 3)
+    assert world_state.get_base_item_count(ItemType.PEACH) == 8
+
+    world_state.modify_base_item(ItemType.PEACH, -3)
+    assert world_state.get_base_item_count(ItemType.PEACH) == 5
+
+
+def test_modify_base_item_rejects_negative_result() -> None:
+    """Base storage refuses mutations that would drive a count below zero."""
+
+    world_state = WorldState()
+    world_state.modify_base_item(ItemType.PEACH, 5)
+
+    with pytest.raises(ValueError):
+        world_state.modify_base_item(ItemType.PEACH, -6)
+
+
+def test_modify_base_item_allows_exact_zero() -> None:
+    """Reducing an item count exactly to zero remains valid."""
+
+    world_state = WorldState()
+    world_state.modify_base_item(ItemType.PEACH, 5)
+
+    world_state.modify_base_item(ItemType.PEACH, -5)
+
+    assert world_state.get_base_item_count(ItemType.PEACH) == 0
+
+
+def test_modify_base_item_keeps_item_types_independent() -> None:
+    """Each base item count changes independently of the others."""
+
+    world_state = WorldState()
+
+    world_state.modify_base_item(ItemType.PEACH, 4)
+    world_state.modify_base_item(ItemType.LOG, 2)
+
+    assert world_state.get_base_item_count(ItemType.PEACH) == 4
+    assert world_state.get_base_item_count(ItemType.LOG) == 2
+
+
+def test_modify_water_applies_positive_and_negative_deltas() -> None:
+    """Water supply applies signed deltas without side effects."""
+
+    world_state = WorldState()
+
+    world_state.modify_water(20_000)
+    assert world_state.water_supply_ml == 20_000
+
+    world_state.modify_water(-500)
+    assert world_state.water_supply_ml == 19_500
+
+
+def test_modify_water_rejects_negative_result() -> None:
+    """Water supply refuses mutations that would drive it below zero."""
+
+    world_state = WorldState()
+    world_state.modify_water(20_000)
+
+    with pytest.raises(ValueError):
+        world_state.modify_water(-20_001)
+
+
+def test_storage_and_water_mutations_are_orthogonal() -> None:
+    """Storage changes do not affect water, and water changes do not affect storage."""
+
+    world_state = WorldState()
+
+    world_state.modify_base_item(ItemType.PEACH, 5)
+    assert world_state.water_supply_ml == 0
+
+    world_state.modify_water(20_000)
+    assert world_state.get_base_item_count(ItemType.PEACH) == 5

@@ -96,3 +96,24 @@ class WorldState:
         self.placed_resting_spots = {}
         self.live_carcasses = []
         self.next_carcass_id = 1
+
+    def modify_base_item(self, item: ItemType, delta: int) -> None:
+        """Apply a signed item delta while keeping base storage non-negative."""
+
+        next_count = self.get_base_item_count(item) + delta
+        if next_count < 0:
+            raise ValueError(f"Base item count for {item!r} cannot be negative.")
+        self.base_storage[item] = next_count
+
+    def get_base_item_count(self, item: ItemType) -> int:
+        """Return the stored quantity for one item type."""
+
+        return self.base_storage.get(item, 0)
+
+    def modify_water(self, delta_ml: int) -> None:
+        """Apply a signed water delta while keeping supply non-negative."""
+
+        next_supply_ml = self.water_supply_ml + delta_ml
+        if next_supply_ml < 0:
+            raise ValueError("Water supply cannot be negative.")
+        self.water_supply_ml = next_supply_ml
