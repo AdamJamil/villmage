@@ -618,6 +618,162 @@ def test_split_logs_draws_from_inventory_then_base() -> None:
     assert ctx.vs.inventory[ItemType.FIREWOOD] == 6
 
 
+def test_craft_new_completion_records_partial_progress() -> None:
+    """Craft completion should advance minutes without awarding the item early."""
+
+    ctx = make_ctx()
+    ctx.vs.set_crafting_state(
+        CraftingProgress(item=CraftableItem.SATCHEL, minutes_spent=0)
+    )
+
+    apply_completion_effect(
+        make_action(ActionType.CRAFT_NEW, minutes_to_spend=120),
+        ctx,
+        0,
+    )
+
+    assert ctx.vs.crafting_in_progress == CraftingProgress(
+        item=CraftableItem.SATCHEL,
+        minutes_spent=120,
+    )
+    assert ctx.vs.inventory.get(ItemType.SATCHEL, 0) == 0
+
+
+def test_craft_new_completion_awards_finished_item() -> None:
+    """Craft completion should clear progress and award the finished recipe output."""
+
+    ctx = make_ctx()
+    ctx.vs.set_crafting_state(
+        CraftingProgress(item=CraftableItem.SATCHEL, minutes_spent=0)
+    )
+
+    apply_completion_effect(
+        make_action(ActionType.CRAFT_NEW, minutes_to_spend=480),
+        ctx,
+        0,
+    )
+
+    assert ctx.vs.crafting_in_progress is None
+    assert ctx.vs.inventory[ItemType.SATCHEL] == 1
+
+
+def test_continue_crafting_completion_advances_progress() -> None:
+    """Continuing craft work should accumulate additional spent minutes."""
+
+    ctx = make_ctx()
+    ctx.vs.set_crafting_state(
+        CraftingProgress(item=CraftableItem.BED_ROLL, minutes_spent=180)
+    )
+
+    apply_completion_effect(
+        make_action(ActionType.CONTINUE_CRAFTING, minutes_to_spend=60),
+        ctx,
+        0,
+    )
+
+    assert ctx.vs.crafting_in_progress == CraftingProgress(
+        item=CraftableItem.BED_ROLL,
+        minutes_spent=240,
+    )
+
+
+def test_continue_crafting_completion_awards_bed_roll() -> None:
+    """Continuing craft work should finish and award a bed roll at 300 minutes."""
+
+    ctx = make_ctx()
+    ctx.vs.set_crafting_state(
+        CraftingProgress(item=CraftableItem.BED_ROLL, minutes_spent=240)
+    )
+
+    apply_completion_effect(
+        make_action(ActionType.CONTINUE_CRAFTING, minutes_to_spend=60),
+        ctx,
+        0,
+    )
+
+    assert ctx.vs.crafting_in_progress is None
+    assert ctx.vs.inventory[ItemType.BED_ROLL] == 1
+
+
+def test_continue_crafting_completion_awards_cot_after_multiple_steps() -> None:
+    """Continuing craft work should preserve partial cot progress until completion."""
+
+    ctx = make_ctx()
+    ctx.vs.set_crafting_state(
+        CraftingProgress(item=CraftableItem.COT, minutes_spent=600)
+    )
+
+    apply_completion_effect(
+        make_action(ActionType.CONTINUE_CRAFTING, minutes_to_spend=180),
+        ctx,
+        0,
+    )
+
+    assert ctx.vs.crafting_in_progress == CraftingProgress(
+        item=CraftableItem.COT,
+        minutes_spent=780,
+    )
+
+    apply_completion_effect(
+        make_action(ActionType.CONTINUE_CRAFTING, minutes_to_spend=180),
+        ctx,
+        0,
+    )
+
+    assert ctx.vs.crafting_in_progress is None
+    assert ctx.vs.inventory[ItemType.COT] == 1
+
+
+def test_cook_meat_completion_transforms_inventory() -> None:
+    """Cooking should spend one carried raw meat and add one cooked meat."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.RAW_MEAT, 2)
+
+    apply_completion_effect(make_action(ActionType.COOK_MEAT), ctx, 0)
+
+    assert ctx.vs.inventory[ItemType.RAW_MEAT] == 1
+    assert ctx.vs.inventory[ItemType.COOKED_MEAT] == 1
+
+
+def test_cook_meat_completion_draws_raw_meat_from_base() -> None:
+    """Cooking should fall back to base storage when no raw meat is carried."""
+
+    ctx = make_ctx()
+    ctx.ws.modify_base_item(ItemType.RAW_MEAT, 1)
+
+    apply_completion_effect(make_action(ActionType.COOK_MEAT), ctx, 0)
+
+    assert ctx.ws.base_storage[ItemType.RAW_MEAT] == 0
+    assert ctx.vs.inventory[ItemType.COOKED_MEAT] == 1
+
+
+def test_cook_meat_completion_adds_cooking_dirtiness() -> None:
+    """Cooking should add one authored cooking-scraps dirtiness unit."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.RAW_MEAT, 1)
+
+    apply_completion_effect(make_action(ActionType.COOK_MEAT), ctx, 0)
+
+    assert ctx.ws.get_total_dirtiness() == 3
+
+
+def test_finish_cooking_completion_matches_cook_meat_and_clears_pause() -> None:
+    """Finishing cooking should share cook-meat effects and clear paused state."""
+
+    ctx = make_ctx()
+    ctx.vs.cooking_paused = True
+    ctx.vs.modify_inventory(ItemType.RAW_MEAT, 1)
+
+    apply_completion_effect(make_action(ActionType.FINISH_COOKING), ctx, 0)
+
+    assert ctx.vs.inventory[ItemType.RAW_MEAT] == 0
+    assert ctx.vs.inventory[ItemType.COOKED_MEAT] == 1
+    assert ctx.ws.get_total_dirtiness() == 3
+    assert ctx.vs.cooking_paused is False
+
+
 @pytest.mark.parametrize(
     ("resource", "expected_item", "yield_count"),
     (

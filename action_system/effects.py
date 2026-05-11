@@ -88,6 +88,15 @@ def _require_duration_minutes(action: SelectedAction) -> int:
     return duration_minutes
 
 
+def _require_minutes_to_spend(action: SelectedAction) -> int:
+    """Return the selected crafting minutes, rejecting malformed actions."""
+
+    minutes_to_spend = action.minutes_to_spend
+    if minutes_to_spend is None:
+        raise ValueError(f"Action {action.action_type!r} requires minutes_to_spend.")
+    return minutes_to_spend
+
+
 def _deduct_inventory_then_base(
     item: ItemType,
     quantity: int,
@@ -118,6 +127,18 @@ def _reduce_cleanliness(penalty: float, ctx: ActionContext) -> None:
     """Deduct authored cleanliness while preserving stat clamping."""
 
     ctx.vs.modify_stat("cleanliness", -penalty)
+
+
+def _crafted_item_type(craftable_item: CraftableItem) -> ItemType:
+    """Return the inventory item produced by the selected crafting job."""
+
+    match craftable_item:
+        case CraftableItem.SATCHEL:
+            return ItemType.SATCHEL
+        case CraftableItem.BED_ROLL:
+            return ItemType.BED_ROLL
+        case CraftableItem.COT:
+            return ItemType.COT
 
 
 def _start_craft_new(action: SelectedAction, ctx: ActionContext) -> None:
@@ -323,6 +344,43 @@ def _complete_split_logs(action: SelectedAction, ctx: ActionContext) -> None:
     ctx.vs.modify_inventory(ItemType.FIREWOOD, quantity * 2)
 
 
+def _current_crafting_progress(ctx: ActionContext) -> CraftingProgress:
+    """Return the active crafting job, rejecting malformed completion state."""
+
+    crafting_progress = ctx.vs.crafting_in_progress
+    if crafting_progress is None:
+        raise ValueError("No crafting job is currently in progress.")
+    return crafting_progress
+
+
+def _complete_crafting(action: SelectedAction, ctx: ActionContext) -> None:
+    """Advance active crafting progress and award the finished item when done."""
+
+    minutes_to_spend = _require_minutes_to_spend(action)
+    crafting_progress = _current_crafting_progress(ctx)
+    updated_minutes = crafting_progress.minutes_spent + minutes_to_spend
+    if updated_minutes >= crafting_progress.item.total_minutes:
+        ctx.vs.set_crafting_state(None)
+        ctx.vs.modify_inventory(_crafted_item_type(crafting_progress.item), 1)
+        return
+    ctx.vs.set_crafting_state(
+        CraftingProgress(
+            item=crafting_progress.item,
+            minutes_spent=updated_minutes,
+        )
+    )
+
+
+def _complete_cooking(action: SelectedAction, ctx: ActionContext) -> None:
+    """Cook one raw meat into one cooked meat and record cooking scraps."""
+
+    del action
+    _deduct_inventory_then_base(ItemType.RAW_MEAT, 1, ctx)
+    ctx.vs.modify_inventory(ItemType.COOKED_MEAT, 1)
+    ctx.ws.update_cleanliness_source(DirtinessSource.COOKING_SCRAPS, 1)
+    ctx.vs.cooking_paused = False
+
+
 def apply_start_effect(action: SelectedAction, ctx: ActionContext) -> None:
     """Dispatch start-effect handler for the given action type."""
 
@@ -381,5 +439,9 @@ def apply_completion_effect(
             _complete_clean_camp(action, ctx)
         case ActionType.SPLIT_LOGS:
             _complete_split_logs(action, ctx)
+        case ActionType.CRAFT_NEW | ActionType.CONTINUE_CRAFTING:
+            _complete_crafting(action, ctx)
+        case ActionType.COOK_MEAT | ActionType.FINISH_COOKING:
+            _complete_cooking(action, ctx)
         case _:
             return
