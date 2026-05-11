@@ -1040,3 +1040,331 @@ def test_trigger_short_term_compaction_reason_has_no_behavioral_effect(
     assert len(memory_system._short_term_memories[aldric]) == 2
     assert len(captured_calls) == 2
     assert captured_calls[0] == captured_calls[1]
+
+
+def test_compact_medium_term_filters_only_previous_day_entries(
+    tmp_path: Path,
+) -> None:
+    """Medium-term compaction includes only the previous day's short-term entries."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system._short_term_memories[aldric].extend(
+        [
+            MemoryEntry(game_time=1000, text="Day 0: Found tracks."),
+            MemoryEntry(game_time=1440, text="Day 1: Hunted boar."),
+            MemoryEntry(game_time=2900, text="Day 2: Sharpened spear."),
+        ]
+    )
+    captured_segments: list[PromptSegment] = []
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Capture the medium-term prompt and return a fixed summary."""
+
+        del call_type
+        captured_segments.extend(segments)
+        return LLMResponse(text="Day 1 summary", input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(memory_system._compact_medium_term(aldric, current_game_time=2880))
+    finally:
+        monkeypatch.undo()
+
+    assert captured_segments == [
+        PromptSegment(
+            role=MessageRole.USER,
+            text=(
+                "Here are your memories from yesterday: "
+                '{"game_time": 1440, "text": "Day 1: Hunted boar."}. '
+                "In 256 tokens (~180 words), form an EXTREMELY CONCISE summary "
+                "of the salient memories you experienced. This will be recorded "
+                "in the future and the rest will be thrown out. Prioritize "
+                "information you will use to inform later actions or opinions on "
+                "others. Prioritize information density and accuracy."
+            ),
+        )
+    ]
+    assert MemoryEntry(game_time=1000, text="Day 0: Found tracks.") in (
+        memory_system._short_term_memories[aldric]
+    )
+    assert MemoryEntry(game_time=2900, text="Day 2: Sharpened spear.") in (
+        memory_system._short_term_memories[aldric]
+    )
+
+
+def test_compact_medium_term_removes_previous_day_entries_after_compaction(
+    tmp_path: Path,
+) -> None:
+    """Successful medium-term compaction removes the compacted short-term entries."""
+
+    aldric = VillagerId("aldric")
+    day_zero_entry = MemoryEntry(game_time=1000, text="Day 0: Found tracks.")
+    day_one_entry = MemoryEntry(game_time=1440, text="Day 1: Hunted boar.")
+    day_two_entry = MemoryEntry(game_time=2900, text="Day 2: Sharpened spear.")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system._short_term_memories[aldric].extend(
+        [day_zero_entry, day_one_entry, day_two_entry]
+    )
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return a fixed medium-term summary."""
+
+        del segments, call_type
+        return LLMResponse(text="Day 1 summary", input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(memory_system._compact_medium_term(aldric, current_game_time=2880))
+    finally:
+        monkeypatch.undo()
+
+    assert memory_system._short_term_memories[aldric] == [day_zero_entry, day_two_entry]
+
+
+def test_compact_medium_term_skips_llm_when_previous_day_is_empty(
+    tmp_path: Path,
+) -> None:
+    """No previous-day short-term entries means medium-term compaction is a no-op."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system._short_term_memories[aldric].append(
+        MemoryEntry(game_time=2880, text="Day 2: Checked traps.")
+    )
+    complete_mock = AsyncMock()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", complete_mock)
+    try:
+        _run_async(memory_system._compact_medium_term(aldric, current_game_time=2880))
+    finally:
+        monkeypatch.undo()
+
+    complete_mock.assert_not_called()
+    assert memory_system._medium_term_memories[aldric] == []
+
+
+def test_compact_medium_term_forces_short_term_compaction_first(
+    tmp_path: Path,
+) -> None:
+    """Uncompacted active events are compacted before medium-term selection runs."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system._short_term_memories[aldric].append(
+        MemoryEntry(game_time=1440, text="Day 1: Hunted boar.")
+    )
+    memory_system.append_event(
+        aldric,
+        EventLogEntry(game_time=2875, type=EventType.ACTION, text="Banked the fire."),
+    )
+    call_texts: list[str] = []
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Capture prompt order for both compaction passes."""
+
+        assert call_type is CallType.MEMORY_COMPACTION
+        call_texts.append(segments[0].text)
+        if "Here is a log of everything you experienced recently:" in segments[0].text:
+            return LLMResponse(text="Day 2 short-term", input_tokens=10, output_tokens=4)
+        return LLMResponse(text="Day 1 medium-term", input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(memory_system._compact_medium_term(aldric, current_game_time=2880))
+    finally:
+        monkeypatch.undo()
+
+    assert len(call_texts) == 2
+    assert "Here is a log of everything you experienced recently:" in call_texts[0]
+    assert "Here are your memories from yesterday:" in call_texts[1]
+    assert memory_system._active_context_log[aldric] == []
+
+
+def test_compact_medium_term_excludes_same_day_entry_created_by_forced_short_term(
+    tmp_path: Path,
+) -> None:
+    """The forced same-day short-term entry remains for the next midnight."""
+
+    aldric = VillagerId("aldric")
+    previous_day_entry = MemoryEntry(game_time=1440, text="Day 1: Hunted boar.")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system._short_term_memories[aldric].append(previous_day_entry)
+    memory_system.append_event(
+        aldric,
+        EventLogEntry(game_time=2875, type=EventType.ACTION, text="Banked the fire."),
+    )
+    captured_medium_prompt = ""
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return one short-term and one medium-term summary while capturing the latter."""
+
+        nonlocal captured_medium_prompt
+        assert call_type is CallType.MEMORY_COMPACTION
+        if "Here is a log of everything you experienced recently:" in segments[0].text:
+            return LLMResponse(
+                text="Day 2: Banked the fire.",
+                input_tokens=10,
+                output_tokens=4,
+            )
+        captured_medium_prompt = segments[0].text
+        return LLMResponse(
+            text="Day 1: Hunted boar, argued with Harren.",
+            input_tokens=10,
+            output_tokens=4,
+        )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(memory_system._compact_medium_term(aldric, current_game_time=2880))
+    finally:
+        monkeypatch.undo()
+
+    assert "Day 1: Hunted boar." in captured_medium_prompt
+    assert "Day 2: Banked the fire." not in captured_medium_prompt
+    assert memory_system._short_term_memories[aldric] == [
+        MemoryEntry(game_time=2880, text="Day 2: Banked the fire.")
+    ]
+
+
+def test_compact_medium_term_stores_entry_with_current_game_time(
+    tmp_path: Path,
+) -> None:
+    """The medium-term MemoryEntry timestamp is the compaction time."""
+
+    aldric = VillagerId("aldric")
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system._short_term_memories[aldric].append(
+        MemoryEntry(game_time=1440, text="Day 1: Hunted boar.")
+    )
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return a fixed medium-term summary."""
+
+        del segments, call_type
+        return LLMResponse(text="Day 1 summary", input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(memory_system._compact_medium_term(aldric, current_game_time=2880))
+    finally:
+        monkeypatch.undo()
+
+    assert memory_system._medium_term_memories[aldric][-1].game_time == 2880
+
+
+def test_compact_medium_term_stores_raw_llm_response_text(
+    tmp_path: Path,
+) -> None:
+    """The stored medium-term text matches the LLM response exactly."""
+
+    aldric = VillagerId("aldric")
+    expected_text = "Day 1: Hunted boar, argued with Harren."
+    memory_system = _make_memory_system([aldric], tmp_path / "events.jsonl")
+    memory_system._short_term_memories[aldric].append(
+        MemoryEntry(game_time=1440, text="Day 1: Hunted boar.")
+    )
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Return the expected medium-term summary."""
+
+        del segments, call_type
+        return LLMResponse(text=expected_text, input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(memory_system._compact_medium_term(aldric, current_game_time=2880))
+    finally:
+        monkeypatch.undo()
+
+    assert memory_system._medium_term_memories[aldric][-1].text == expected_text
+
+
+def test_trigger_midnight_compaction_runs_for_all_villagers(tmp_path: Path) -> None:
+    """Midnight compaction runs one medium-term pass per villager."""
+
+    villager_ids = [VillagerId("aldric"), VillagerId("maren"), VillagerId("ivette")]
+    memory_system = _make_memory_system(villager_ids, tmp_path / "events.jsonl")
+    for villager_id in villager_ids:
+        memory_system._short_term_memories[villager_id].append(
+            MemoryEntry(game_time=1440, text=f"Day 1: {villager_id} acted.")
+        )
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Echo each villager-specific prompt into a generic summary."""
+
+        del call_type
+        return LLMResponse(text=segments[0].text, input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(memory_system.trigger_midnight_compaction(current_game_time=2880))
+    finally:
+        monkeypatch.undo()
+
+    for villager_id in villager_ids:
+        assert len(memory_system._medium_term_memories[villager_id]) == 1
+        assert memory_system._short_term_memories[villager_id] == []
+
+
+def test_trigger_midnight_compaction_leaves_empty_villager_unchanged(
+    tmp_path: Path,
+) -> None:
+    """A villager with no previous-day entries remains a no-op at midnight."""
+
+    aldric = VillagerId("aldric")
+    maren = VillagerId("maren")
+    memory_system = _make_memory_system([aldric, maren], tmp_path / "events.jsonl")
+    memory_system._short_term_memories[aldric].append(
+        MemoryEntry(game_time=1440, text="Day 1: Hunted boar.")
+    )
+    captured_prompts: list[str] = []
+
+    async def fake_complete(
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Capture the villagers that actually trigger a medium-term LLM call."""
+
+        assert call_type is CallType.MEMORY_COMPACTION
+        captured_prompts.append(segments[0].text)
+        return LLMResponse(text="summary", input_tokens=10, output_tokens=4)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(memory_system._llm_client, "complete", fake_complete)
+    try:
+        _run_async(memory_system.trigger_midnight_compaction(current_game_time=2880))
+    finally:
+        monkeypatch.undo()
+
+    assert len(captured_prompts) == 1
+    assert memory_system._short_term_memories[maren] == []
+    assert memory_system._medium_term_memories[maren] == []

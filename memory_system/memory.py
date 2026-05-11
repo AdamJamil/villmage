@@ -32,6 +32,13 @@ _SHORT_TERM_COMPACTION_PROMPT = (
     "will be thrown out. Prioritize information you will use to inform later "
     "actions or opinions on others. Prioritize information density and accuracy."
 )
+_MEDIUM_TERM_COMPACTION_PROMPT = (
+    "Here are your memories from yesterday: {memories}. "
+    "In 256 tokens (~180 words), form an EXTREMELY CONCISE summary of the salient "
+    "memories you experienced. This will be recorded in the future and the rest "
+    "will be thrown out. Prioritize information you will use to inform later "
+    "actions or opinions on others. Prioritize information density and accuracy."
+)
 
 
 class MemorySystem:
@@ -97,6 +104,18 @@ class MemorySystem:
 
         return "\n".join(json.dumps(asdict(entry)) for entry in entries)
 
+    @staticmethod
+    def _serialize_memory_entries(entries: list[MemoryEntry]) -> str:
+        """Return one stable string serialization of a chronological memory slice."""
+
+        return "\n".join(json.dumps(asdict(entry)) for entry in entries)
+
+    @staticmethod
+    def _is_from_day(entry: MemoryEntry, day: int) -> bool:
+        """Return whether one memory entry was compacted during the supplied day."""
+
+        return entry.game_time // 1440 == day
+
     def write_impressions(
         self,
         speaker_id: VillagerId,
@@ -137,6 +156,52 @@ class MemorySystem:
             MemoryEntry(game_time=game_time, text=response.text)
         )
         active_context_log.clear()
+
+    async def _compact_medium_term(
+        self,
+        villager_id: VillagerId,
+        current_game_time: int,
+    ) -> None:
+        """Compact one villager's previous-day short-term memories into medium-term."""
+
+        if len(self._active_context_log[villager_id]) > 0:
+            await self.trigger_short_term_compaction(
+                villager_id,
+                current_game_time,
+                CompactionReason.AWAKE_THRESHOLD,
+            )
+
+        previous_day = (current_game_time // 1440) - 1
+        short_term_memories = self._short_term_memories[villager_id]
+        previous_day_entries = [
+            entry
+            for entry in short_term_memories
+            if self._is_from_day(entry, previous_day)
+        ]
+        if len(previous_day_entries) == 0:
+            return
+
+        prompt = _MEDIUM_TERM_COMPACTION_PROMPT.format(
+            memories=self._serialize_memory_entries(previous_day_entries)
+        )
+        response = await self._llm_client.complete(
+            [PromptSegment(role=MessageRole.USER, text=prompt)],
+            CallType.MEMORY_COMPACTION,
+        )
+        self._medium_term_memories[villager_id].append(
+            MemoryEntry(game_time=current_game_time, text=response.text)
+        )
+        self._short_term_memories[villager_id] = [
+            entry
+            for entry in short_term_memories
+            if not self._is_from_day(entry, previous_day)
+        ]
+
+    async def trigger_midnight_compaction(self, current_game_time: int) -> None:
+        """Run the medium-term midnight compaction pass for every villager."""
+
+        for villager_id in self._active_context_log:
+            await self._compact_medium_term(villager_id, current_game_time)
 
     @staticmethod
     def _copy_memory_map(
