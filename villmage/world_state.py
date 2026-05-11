@@ -118,6 +118,22 @@ class WorldState:
             raise ValueError("Water supply cannot be negative.")
         self.water_supply_ml = next_supply_ml
 
+    def update_cleanliness_source(self, source: DirtinessSource, delta: int) -> None:
+        """Adjust one dirtiness source count while keeping it non-negative."""
+
+        next_count = self.dirtiness_counts.get(source, 0) + delta
+        if next_count < 0:
+            raise ValueError(f"Dirtiness count for {source!r} cannot be negative.")
+        self.dirtiness_counts[source] = next_count
+
+    def clear_dirtiness(self) -> int:
+        """Zero all dirtiness counts and return the pre-clear total dirtiness."""
+
+        total_dirtiness = self.get_total_dirtiness()
+        for source in DirtinessSource:
+            self.dirtiness_counts[source] = 0
+        return total_dirtiness
+
     def _get_queued_fuel_minutes(self) -> int:
         """Return the total burn minutes represented by the queued fuel."""
 
@@ -209,3 +225,12 @@ class WorldState:
                 return 0
             return extinction_timestamp - current_time
         return self._get_queued_fuel_minutes()
+
+    def get_total_dirtiness(self) -> int:
+        """Return weighted camp dirtiness across all sources, capped at 100."""
+
+        total_dirtiness = sum(
+            self.dirtiness_counts.get(source, 0) * DIRTINESS_PENALTY[source]
+            for source in DirtinessSource
+        )
+        return min(100, total_dirtiness)

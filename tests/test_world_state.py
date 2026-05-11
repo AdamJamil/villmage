@@ -382,3 +382,100 @@ def test_fire_extinction_timestamp_invariant_after_each_transition() -> None:
     world_state.mark_fire_extinguished()
     assert world_state.fire.extinction_timestamp is None
     assert_fire_timestamp_invariant(world_state)
+
+
+def test_get_total_dirtiness_starts_at_zero() -> None:
+    """A fresh world state has no camp dirtiness."""
+
+    world_state = WorldState()
+
+    assert world_state.get_total_dirtiness() == 0
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_total"),
+    [
+        (DirtinessSource.CARCASS_REMAINS, 30),
+        (DirtinessSource.MEAT_SCRAPS, 5),
+        (DirtinessSource.COOKING_SCRAPS, 3),
+    ],
+)
+def test_get_total_dirtiness_matches_per_source_penalties(
+    source: DirtinessSource,
+    expected_total: int,
+) -> None:
+    """Each dirtiness source contributes its authored per-unit amount."""
+
+    world_state = WorldState()
+
+    world_state.update_cleanliness_source(source, 1)
+
+    assert world_state.get_total_dirtiness() == expected_total
+
+
+def test_get_total_dirtiness_adds_across_sources() -> None:
+    """Total dirtiness is the sum of all source contributions."""
+
+    world_state = WorldState()
+
+    world_state.update_cleanliness_source(DirtinessSource.CARCASS_REMAINS, 1)
+    world_state.update_cleanliness_source(DirtinessSource.MEAT_SCRAPS, 1)
+    world_state.update_cleanliness_source(DirtinessSource.COOKING_SCRAPS, 1)
+
+    assert world_state.get_total_dirtiness() == 38
+
+
+def test_get_total_dirtiness_caps_at_one_hundred() -> None:
+    """The camp dirtiness total is capped at the authored maximum."""
+
+    world_state = WorldState()
+
+    world_state.update_cleanliness_source(DirtinessSource.CARCASS_REMAINS, 4)
+
+    assert world_state.get_total_dirtiness() == 100
+
+
+def test_clear_dirtiness_returns_total_before_clearing() -> None:
+    """Clearing reports the total dirtiness that was removed."""
+
+    world_state = WorldState()
+    world_state.update_cleanliness_source(DirtinessSource.MEAT_SCRAPS, 1)
+    world_state.update_cleanliness_source(DirtinessSource.COOKING_SCRAPS, 1)
+
+    cleared_total = world_state.clear_dirtiness()
+
+    assert cleared_total == 8
+
+
+def test_clear_dirtiness_zeroes_all_sources() -> None:
+    """Clearing resets both the derived total and every stored source count."""
+
+    world_state = WorldState()
+    world_state.update_cleanliness_source(DirtinessSource.CARCASS_REMAINS, 1)
+    world_state.update_cleanliness_source(DirtinessSource.MEAT_SCRAPS, 2)
+    world_state.update_cleanliness_source(DirtinessSource.COOKING_SCRAPS, 3)
+
+    world_state.clear_dirtiness()
+
+    assert world_state.get_total_dirtiness() == 0
+    for source in DirtinessSource:
+        assert world_state.dirtiness_counts[source] == 0
+
+
+def test_clear_dirtiness_on_clean_state_returns_zero() -> None:
+    """Clearing an already clean camp is a zero-cost no-op."""
+
+    world_state = WorldState()
+
+    assert world_state.clear_dirtiness() == 0
+
+
+def test_update_cleanliness_source_supports_decrement() -> None:
+    """Signed dirtiness deltas can reduce a source count."""
+
+    world_state = WorldState()
+
+    world_state.update_cleanliness_source(DirtinessSource.MEAT_SCRAPS, 2)
+    world_state.update_cleanliness_source(DirtinessSource.MEAT_SCRAPS, -1)
+
+    assert world_state.get_total_dirtiness() == 5
