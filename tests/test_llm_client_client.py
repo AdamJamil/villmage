@@ -2,13 +2,19 @@
 
 """Tests for LLM client content assembly."""
 
+import asyncio
+from dataclasses import dataclass
 import logging
+from typing import Awaitable, TypeVar
 
 import pytest
 
 import llm_client.client as client_module
 from llm_client.client import LLMClient
-from llm_client.types import LLMConfig, MessageRole, PromptSegment
+from llm_client.types import CallType, LLMConfig, MessageRole, PromptSegment
+
+
+_T = TypeVar("_T")
 
 
 def _texts(contents: list[client_module.Content]) -> list[str]:
@@ -27,6 +33,22 @@ class _FakeHTTPError(Exception):
         self.status_code = status_code
 
 
+@dataclass(frozen=True)
+class _FakeUsageMetadata:
+    """Usage metadata stub returned by the mocked Gemini SDK."""
+
+    input_token_count: int
+    output_token_count: int
+
+
+@dataclass(frozen=True)
+class _FakeGenerateContentResponse:
+    """GenerateContentResponse stub used by complete() tests."""
+
+    text: str
+    usage_metadata: _FakeUsageMetadata
+
+
 class _FakeModel:
     """Scriptable model stub for retry tests."""
 
@@ -36,6 +58,7 @@ class _FakeModel:
         self._outcomes = outcomes
         self.call_count = 0
         self.generation_configs: list[object | None] = []
+        self.requests: list[client_module.GenerateContentRequest] = []
 
     def generate_content(
         self,
@@ -45,8 +68,8 @@ class _FakeModel:
     ) -> object:
         """Return the next scripted result or raise the next scripted error."""
 
-        del request
         self.call_count += 1
+        self.requests.append(request)
         self.generation_configs.append(generation_config)
         outcome = self._outcomes[self.call_count - 1]
         if isinstance(outcome, BaseException):
@@ -77,6 +100,12 @@ def _make_client(fake_model: _FakeModel, max_retries: int = 10) -> LLMClient:
 
     assert captured == [("gemini-test", "secret-key")]
     return client
+
+
+def _run_async(coroutine: Awaitable[_T]) -> _T:
+    """Run one async call in tests without requiring pytest-trio."""
+
+    return asyncio.run(coroutine)
 
 
 def test_init_constructs_one_model_with_configured_name() -> None:
@@ -398,3 +427,162 @@ def test_submit_with_retry_logs_each_failure(
     assert "attempt 2" in second_message
     assert "500" in second_message or "_FakeHTTPError" in second_message
     assert "wait=2.0s" in second_message
+
+
+@pytest.mark.parametrize(
+    ("call_type", "expected_temperature"),
+    [
+        (CallType.ACTION_SELECTION, 0.7),
+        (CallType.CONVERSATION_TURN, 1.0),
+        (CallType.MEMORY_COMPACTION, 0.2),
+        (CallType.RELATIONSHIP_UPDATE, 0.4),
+    ],
+)
+def test_complete_uses_expected_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+    call_type: CallType,
+    expected_temperature: float,
+) -> None:
+    """complete() selects the correct temperature for each call type."""
+
+    client = LLMClient(config=LLMConfig(model="gemini-test"), api_key="test")
+    captured_temperatures: list[float] = []
+
+    def fake_submit_with_retry(
+        request: client_module.GenerateContentRequest,
+        temperature: float,
+    ) -> object:
+        """Record the selected temperature and return a fake SDK response."""
+
+        del request
+        captured_temperatures.append(temperature)
+        return _FakeGenerateContentResponse(
+            text="ok",
+            usage_metadata=_FakeUsageMetadata(
+                input_token_count=1,
+                output_token_count=2,
+            ),
+        )
+
+    monkeypatch.setattr(client, "_submit_with_retry", fake_submit_with_retry)
+
+    response = _run_async(
+        client.complete(
+            [PromptSegment(role=MessageRole.USER, text="hello")],
+            call_type,
+        )
+    )
+
+    assert response.text == "ok"
+    assert captured_temperatures == [expected_temperature]
+
+
+def test_complete_returns_raw_text_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """complete() preserves Gemini response text exactly as returned."""
+
+    client = LLMClient(config=LLMConfig(model="gemini-test"), api_key="test")
+    raw_text = "  padded text\n"
+
+    def fake_submit_with_retry(
+        request: client_module.GenerateContentRequest,
+        temperature: float,
+    ) -> object:
+        """Return a response with intentionally unnormalized whitespace."""
+
+        del request, temperature
+        return _FakeGenerateContentResponse(
+            text=raw_text,
+            usage_metadata=_FakeUsageMetadata(
+                input_token_count=11,
+                output_token_count=7,
+            ),
+        )
+
+    monkeypatch.setattr(client, "_submit_with_retry", fake_submit_with_retry)
+
+    response = _run_async(
+        client.complete(
+            [PromptSegment(role=MessageRole.USER, text="hello")],
+            CallType.CONVERSATION_TURN,
+        )
+    )
+
+    assert response.text == raw_text
+
+
+def test_complete_returns_usage_token_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """complete() forwards Gemini usage metadata without modification."""
+
+    client = LLMClient(config=LLMConfig(model="gemini-test"), api_key="test")
+
+    def fake_submit_with_retry(
+        request: client_module.GenerateContentRequest,
+        temperature: float,
+    ) -> object:
+        """Return a response with known usage metadata values."""
+
+        del request, temperature
+        return _FakeGenerateContentResponse(
+            text="tokens",
+            usage_metadata=_FakeUsageMetadata(
+                input_token_count=123,
+                output_token_count=45,
+            ),
+        )
+
+    monkeypatch.setattr(client, "_submit_with_retry", fake_submit_with_retry)
+
+    response = _run_async(
+        client.complete(
+            [PromptSegment(role=MessageRole.USER, text="hello")],
+            CallType.MEMORY_COMPACTION,
+        )
+    )
+
+    assert response.input_tokens == 123
+    assert response.output_tokens == 45
+
+
+def test_complete_async_smoke() -> None:
+    """complete() composes request assembly, submission, and unwrapping."""
+
+    fake_model = _FakeModel(
+        [
+            _FakeGenerateContentResponse(
+                text="final text",
+                usage_metadata=_FakeUsageMetadata(
+                    input_token_count=321,
+                    output_token_count=54,
+                ),
+            )
+        ]
+    )
+    client = _make_client(fake_model)
+
+    response = _run_async(
+        client.complete(
+            [
+                PromptSegment(role=MessageRole.SYSTEM, text="system one "),
+                PromptSegment(role=MessageRole.SYSTEM, text="system two"),
+                PromptSegment(role=MessageRole.USER, text="first user"),
+                PromptSegment(role=MessageRole.MODEL, text="first model"),
+                PromptSegment(role=MessageRole.USER, text="final user"),
+            ],
+            CallType.ACTION_SELECTION,
+        )
+    )
+
+    assert response.text == "final text"
+    assert response.input_tokens == 321
+    assert response.output_tokens == 54
+    assert fake_model.call_count == 1
+    assert fake_model.generation_configs == [{"temperature": 0.7}]
+    assert len(fake_model.requests) == 1
+    request = fake_model.requests[0]
+    assert request.model == "gemini-test"
+    assert request.system_instruction == "system one system two"
+    assert request.contents is not None
+    assert [content.role for content in request.contents] == ["user", "model", "user"]
+    assert _texts(request.contents) == ["first user", "first model", "final user"]

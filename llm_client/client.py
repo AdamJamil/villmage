@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Final, Protocol, cast
 
-from llm_client.types import LLMConfig, MessageRole, PromptSegment
+from llm_client.types import CallType, LLMConfig, LLMResponse, MessageRole, PromptSegment
 
 try:
     import google.generativeai as _google_generativeai
@@ -21,7 +21,9 @@ except ImportError:
     class GenerateContentRequest:
         """Fallback request stub used when Gemini request types are unavailable."""
 
-        payload: object | None = None
+        model: str = ""
+        system_instruction: str = ""
+        contents: list["Content"] | None = None
 
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
@@ -71,6 +73,20 @@ class _GenerativeModelProtocol(Protocol):
         generation_config: object | None = None,
     ) -> object:
         """Submit one request and return the SDK response."""
+
+
+class _UsageMetadataProtocol(Protocol):
+    """Subset of Gemini usage metadata needed by LLMClient."""
+
+    input_token_count: int
+    output_token_count: int
+
+
+class _GenerateContentResponseProtocol(Protocol):
+    """Subset of Gemini response data returned by LLMClient."""
+
+    text: str
+    usage_metadata: _UsageMetadataProtocol
 
 
 def _create_generative_model(
@@ -167,6 +183,12 @@ class LLMClient:
         MessageRole.USER: "user",
         MessageRole.MODEL: "model",
     }
+    _TEMPERATURES: Final[dict[CallType, float]] = {
+        CallType.ACTION_SELECTION: 0.7,
+        CallType.CONVERSATION_TURN: 1.0,
+        CallType.MEMORY_COMPACTION: 0.2,
+        CallType.RELATIONSHIP_UPDATE: 0.4,
+    }
 
     def __init__(self, config: LLMConfig, api_key: str) -> None:
         """Create one shared GenerativeModel for the configured model name."""
@@ -176,6 +198,24 @@ class LLMClient:
             model_name=config.model,
             api_key=api_key,
         )
+
+    async def complete(
+        self,
+        segments: list[PromptSegment],
+        call_type: CallType,
+    ) -> LLMResponse:
+        """Submit one prompt and return the raw completion with token counts."""
+
+        temperature = self._TEMPERATURES[call_type]
+        system_instruction, contents = self._build_contents(segments)
+        request = GenerateContentRequest(
+            model=self._config.model,
+            system_instruction=system_instruction,
+            contents=contents,
+        )
+
+        response = self._submit_with_retry(request, temperature)
+        return self._response_to_llm_response(response)
 
     def _build_contents(
         self,
@@ -231,3 +271,14 @@ class LLMClient:
                 wait_seconds = _backoff_seconds(attempt_number)
                 _log_failed_attempt(error, attempt_number, wait_seconds)
                 time.sleep(wait_seconds)
+
+    def _response_to_llm_response(self, response: object) -> LLMResponse:
+        """Convert a Gemini SDK response into the package response type."""
+
+        sdk_response = cast(_GenerateContentResponseProtocol, response)
+        usage_metadata = sdk_response.usage_metadata
+        return LLMResponse(
+            text=sdk_response.text,
+            input_tokens=usage_metadata.input_token_count,
+            output_tokens=usage_metadata.output_token_count,
+        )
