@@ -11,10 +11,16 @@ import pytest
 
 from conversation_system.conversation import ConversationSystem, format_turn_text
 from conversation_system.types import ConversationSession
-from memory_system.types import EventLogEntry, VillagerId as MemoryVillagerId
-from villmage.game_types import ActionCategory
+from memory_system.types import EventLogEntry, EventType, VillagerId as MemoryVillagerId
+from villmage.game_types import ActionCategory, ItemType
 from villmage.ai_coordinator.types import ConversationTurn
-from villmage.ai_coordinator.types import ConvActionType, ConversationTurnResult
+from villmage.ai_coordinator.types import (
+    ConvActionType,
+    ConversationTurnResult,
+    TradeActionType,
+    TradeItemSpec,
+    TradeTurnResult,
+)
 from villmage.villager_state import CurrentAction, VillagerState
 
 
@@ -76,6 +82,25 @@ def _villager_state(
     villager_state.wakefulness = wakefulness
     villager_state.set_current_action(current_action)
     return villager_state
+
+
+def _trade_item(item: ItemType, quantity: int) -> TradeItemSpec:
+    """Build one compact trade item spec for tests."""
+
+    return TradeItemSpec(item=item, quantity=quantity)
+
+
+def _trade_session(participant_ids: list[str], elapsed_game_minutes: int) -> ConversationSession:
+    """Build a minimal conversation session for trade subprotocol tests."""
+
+    return ConversationSession(
+        participant_ids=list(participant_ids),
+        all_participant_ids=list(participant_ids),
+        full_turn_log=[],
+        join_turn_index={villager_id: 0 for villager_id in participant_ids},
+        elapsed_game_minutes=elapsed_game_minutes,
+        last_spoke_turn={},
+    )
 
 
 @pytest.mark.parametrize(
@@ -659,3 +684,279 @@ def test_pause_for_joiners_keeps_all_parallel_joiners() -> None:
 
     assert session.participant_ids == ["initiator", "target", "joiner_a", "joiner_b"]
     assert session.all_participant_ids == ["initiator", "target", "joiner_a", "joiner_b"]
+
+
+def test_run_trade_subprotocol_completes_when_partner_accepts_initiator_offer() -> None:
+    """Partner acceptance completes the trade and swaps both sides' last offers."""
+
+    coordinator = Mock()
+    coordinator.get_trade_turn.side_effect = [
+        TradeTurnResult(
+            action=TradeActionType.MAKE_OFFER,
+            items=[_trade_item(ItemType.PEACH, 2)],
+        ),
+        TradeTurnResult(action=TradeActionType.ACCEPT, items=[]),
+    ]
+    memory = _MemoryRecorder()
+    initiator_state = _villager_state("initiator")
+    partner_state = _villager_state("partner")
+    initiator_state.modify_inventory(ItemType.PEACH, 3)
+    partner_state.modify_inventory = Mock(wraps=partner_state.modify_inventory)
+    initiator_state.modify_inventory = Mock(wraps=initiator_state.modify_inventory)
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        memory_system=memory,
+        canon=_CanonStub(
+            {"initiator": "Initiator", "partner": "Partner", "bystander": "Bystander"}
+        ),
+        villager_states={
+            "initiator": initiator_state,
+            "partner": partner_state,
+            "bystander": _villager_state("bystander"),
+        },
+    )
+    session = _trade_session(["initiator", "partner", "bystander"], elapsed_game_minutes=10)
+
+    asyncio.run(system._run_trade_subprotocol(session, "initiator", "partner", 200))
+
+    assert session.active_trade is None
+    assert session.elapsed_game_minutes == 10
+    assert initiator_state.inventory[ItemType.PEACH] == 1
+    assert partner_state.inventory[ItemType.PEACH] == 2
+    assert initiator_state.modify_inventory.call_count == 1
+    assert partner_state.modify_inventory.call_count == 1
+    assert [entry.type for entry in memory.events_by_villager["bystander"]] == [
+        EventType.TRADE,
+        EventType.TRADE,
+    ]
+    assert memory.events_by_villager["bystander"][-1].text == (
+        "Partner and Initiator complete the trade. "
+        "Partner receives 2 PEACH. "
+        "Initiator receives nothing."
+    )
+
+
+def test_run_trade_subprotocol_completes_when_initiator_accepts_partner_offer() -> None:
+    """Initiator acceptance uses the partner's last offer and the initiator's own last offer."""
+
+    coordinator = Mock()
+    coordinator.get_trade_turn.side_effect = [
+        TradeTurnResult(
+            action=TradeActionType.MAKE_OFFER,
+            items=[_trade_item(ItemType.LOG, 1)],
+        ),
+        TradeTurnResult(
+            action=TradeActionType.MAKE_OFFER,
+            items=[_trade_item(ItemType.COOKED_MEAT, 2)],
+        ),
+        TradeTurnResult(action=TradeActionType.ACCEPT, items=[]),
+    ]
+    initiator_state = _villager_state("initiator")
+    partner_state = _villager_state("partner")
+    initiator_state.modify_inventory(ItemType.LOG, 1)
+    partner_state.modify_inventory(ItemType.COOKED_MEAT, 2)
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        memory_system=_MemoryRecorder(),
+        canon=_CanonStub({"initiator": "Initiator", "partner": "Partner"}),
+        villager_states={
+            "initiator": initiator_state,
+            "partner": partner_state,
+        },
+    )
+    session = _trade_session(["initiator", "partner"], elapsed_game_minutes=15)
+
+    asyncio.run(system._run_trade_subprotocol(session, "initiator", "partner", 205))
+
+    assert session.elapsed_game_minutes == 15
+    assert initiator_state.inventory[ItemType.LOG] == 0
+    assert initiator_state.inventory[ItemType.COOKED_MEAT] == 2
+    assert partner_state.inventory[ItemType.COOKED_MEAT] == 0
+    assert partner_state.inventory[ItemType.LOG] == 1
+
+
+def test_run_trade_subprotocol_treats_accept_after_cancel_as_no_op_then_cancels_on_turn_six() -> None:
+    """Invalid ACCEPT does not append history and still advances toward the six-turn cancel cap."""
+
+    coordinator = Mock()
+    coordinator.get_trade_turn.side_effect = [
+        TradeTurnResult(action=TradeActionType.CANCEL, items=[]),
+        TradeTurnResult(action=TradeActionType.ACCEPT, items=[]),
+        TradeTurnResult(
+            action=TradeActionType.REQUEST_ITEMS,
+            items=[_trade_item(ItemType.STICK, 1)],
+        ),
+        TradeTurnResult(
+            action=TradeActionType.REQUEST_ITEMS,
+            items=[_trade_item(ItemType.PEACH, 1)],
+        ),
+        TradeTurnResult(
+            action=TradeActionType.REQUEST_ITEMS,
+            items=[_trade_item(ItemType.LOG, 1)],
+        ),
+        TradeTurnResult(
+            action=TradeActionType.REQUEST_ITEMS,
+            items=[_trade_item(ItemType.COOKED_MEAT, 1)],
+        ),
+    ]
+    memory = _MemoryRecorder()
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        memory_system=memory,
+        canon=_CanonStub(
+            {"initiator": "Initiator", "partner": "Partner", "bystander": "Bystander"}
+        ),
+        villager_states={
+            "initiator": _villager_state("initiator"),
+            "partner": _villager_state("partner"),
+            "bystander": _villager_state("bystander"),
+        },
+    )
+    session = _trade_session(["initiator", "partner", "bystander"], elapsed_game_minutes=20)
+
+    asyncio.run(system._run_trade_subprotocol(session, "initiator", "partner", 210))
+
+    assert session.active_trade is None
+    assert session.elapsed_game_minutes == 20
+    assert coordinator.get_trade_turn.call_count == 6
+    bystander_texts = [entry.text for entry in memory.events_by_villager["bystander"]]
+    assert len(bystander_texts) == 6
+    assert bystander_texts[0] == "Initiator cancels the trade."
+    assert bystander_texts[-1] == "Initiator and Partner end the trade without an exchange."
+    assert all("accepts" not in text for text in bystander_texts)
+
+
+def test_run_trade_subprotocol_treats_accept_with_no_prior_partner_offer_as_no_op() -> None:
+    """An initial ACCEPT with empty history is ignored and the trade continues normally."""
+
+    coordinator = Mock()
+    coordinator.get_trade_turn.side_effect = [
+        TradeTurnResult(action=TradeActionType.ACCEPT, items=[]),
+        TradeTurnResult(
+            action=TradeActionType.MAKE_OFFER,
+            items=[_trade_item(ItemType.PEACH, 1)],
+        ),
+        TradeTurnResult(action=TradeActionType.ACCEPT, items=[]),
+    ]
+    initiator_state = _villager_state("initiator")
+    partner_state = _villager_state("partner")
+    partner_state.modify_inventory(ItemType.PEACH, 1)
+    memory = _MemoryRecorder()
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        memory_system=memory,
+        canon=_CanonStub({"initiator": "Initiator", "partner": "Partner"}),
+        villager_states={
+            "initiator": initiator_state,
+            "partner": partner_state,
+        },
+    )
+    session = _trade_session(["initiator", "partner"], elapsed_game_minutes=25)
+
+    asyncio.run(system._run_trade_subprotocol(session, "initiator", "partner", 215))
+
+    assert session.elapsed_game_minutes == 25
+    assert initiator_state.inventory[ItemType.PEACH] == 1
+    assert [entry.text for entry in memory.events_by_villager["initiator"]] == [
+        "Partner offers 1 PEACH.",
+        "Initiator and Partner complete the trade. Initiator receives 1 PEACH. Partner receives nothing.",
+    ]
+
+
+def test_run_trade_subprotocol_cancels_after_exactly_six_turns_without_acceptance() -> None:
+    """Six non-completing turns end the trade with a shared cancellation event and no transfer."""
+
+    coordinator = Mock()
+    coordinator.get_trade_turn.side_effect = [
+        TradeTurnResult(
+            action=TradeActionType.REQUEST_ITEMS,
+            items=[_trade_item(ItemType.PEACH, 1)],
+        ),
+        TradeTurnResult(
+            action=TradeActionType.REQUEST_ITEMS,
+            items=[_trade_item(ItemType.LOG, 1)],
+        ),
+        TradeTurnResult(
+            action=TradeActionType.REQUEST_ITEMS,
+            items=[_trade_item(ItemType.STICK, 1)],
+        ),
+        TradeTurnResult(
+            action=TradeActionType.REQUEST_ITEMS,
+            items=[_trade_item(ItemType.COOKED_MEAT, 1)],
+        ),
+        TradeTurnResult(
+            action=TradeActionType.REQUEST_ITEMS,
+            items=[_trade_item(ItemType.LEAVES, 1)],
+        ),
+        TradeTurnResult(
+            action=TradeActionType.REQUEST_ITEMS,
+            items=[_trade_item(ItemType.RAW_HIDE, 1)],
+        ),
+    ]
+    memory = _MemoryRecorder()
+    initiator_state = _villager_state("initiator")
+    partner_state = _villager_state("partner")
+    initiator_state.modify_inventory(ItemType.PEACH, 2)
+    partner_state.modify_inventory(ItemType.LOG, 2)
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        memory_system=memory,
+        canon=_CanonStub(
+            {"initiator": "Initiator", "partner": "Partner", "bystander": "Bystander"}
+        ),
+        villager_states={
+            "initiator": initiator_state,
+            "partner": partner_state,
+            "bystander": _villager_state("bystander"),
+        },
+    )
+    session = _trade_session(["initiator", "partner", "bystander"], elapsed_game_minutes=30)
+
+    asyncio.run(system._run_trade_subprotocol(session, "initiator", "partner", 220))
+
+    assert session.active_trade is None
+    assert session.elapsed_game_minutes == 30
+    assert initiator_state.inventory[ItemType.PEACH] == 2
+    assert partner_state.inventory[ItemType.LOG] == 2
+    for villager_id in ["initiator", "partner", "bystander"]:
+        assert memory.events_by_villager[villager_id][-1].text == (
+            "Initiator and Partner end the trade without an exchange."
+        )
+
+
+def test_run_trade_subprotocol_honors_explicit_cancel_without_inventory_transfer() -> None:
+    """Either side can cancel immediately, ending the trade without exchanging items."""
+
+    coordinator = Mock()
+    coordinator.get_trade_turn.side_effect = [
+        TradeTurnResult(
+            action=TradeActionType.MAKE_OFFER,
+            items=[_trade_item(ItemType.PEACH, 1)],
+        ),
+        TradeTurnResult(action=TradeActionType.CANCEL, items=[]),
+    ]
+    memory = _MemoryRecorder()
+    initiator_state = _villager_state("initiator")
+    partner_state = _villager_state("partner")
+    initiator_state.modify_inventory(ItemType.PEACH, 1)
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        memory_system=memory,
+        canon=_CanonStub({"initiator": "Initiator", "partner": "Partner"}),
+        villager_states={
+            "initiator": initiator_state,
+            "partner": partner_state,
+        },
+    )
+    session = _trade_session(["initiator", "partner"], elapsed_game_minutes=35)
+
+    asyncio.run(system._run_trade_subprotocol(session, "initiator", "partner", 225))
+
+    assert session.elapsed_game_minutes == 35
+    assert initiator_state.inventory[ItemType.PEACH] == 1
+    assert partner_state.inventory == {}
+    assert [entry.text for entry in memory.events_by_villager["partner"]] == [
+        "Initiator offers 1 PEACH.",
+        "Partner cancels the trade.",
+        "Initiator and Partner end the trade without an exchange.",
+    ]

@@ -9,14 +9,19 @@ import inspect
 from typing import Awaitable, Protocol, cast
 
 from character_canon.types import VillagerCanon, VillagerId as CanonVillagerId
-from conversation_system.types import ConversationSession
+from conversation_system.types import ActiveTrade, ConversationSession
 from memory_system.types import EventLogEntry, EventType, VillagerId as MemoryVillagerId
-from villmage.game_types import ActionCategory
+from villmage.game_types import ActionCategory, ItemType
 from villmage.ai_coordinator.types import (
     ConvActionType,
     ConversationSnapshot,
     ConversationTurn,
     ConversationTurnResult,
+    TradeActionType,
+    TradeItemSpec,
+    TradeSnapshot,
+    TradeTurnRecord,
+    TradeTurnResult,
 )
 from villmage.villager_state import VillagerState
 
@@ -40,6 +45,14 @@ class _AICoordinatorProtocol(Protocol):
         game_time: int,
     ) -> bool | Awaitable[bool]:
         """Return whether one villager chooses to join an active conversation."""
+
+    def get_trade_turn(
+        self,
+        villager_id: str,
+        snapshot: TradeSnapshot,
+        game_time: int,
+    ) -> TradeTurnResult | Awaitable[TradeTurnResult]:
+        """Return one villager's trade-turn decision."""
 
 
 class _MemorySystemProtocol(Protocol):
@@ -366,6 +379,286 @@ class ConversationSystem:
         for participant_id in participant_ids:
             memory_system.append_event(MemoryVillagerId(participant_id), entry)
 
+    async def _run_trade_subprotocol(
+        self,
+        session: ConversationSession,
+        trade_initiator_id: str,
+        trade_partner_id: str,
+        game_time: int,
+    ) -> None:
+        """Run one complete trade negotiation without consuming game time."""
+
+        active_trade = ActiveTrade(
+            initiator_id=trade_initiator_id,
+            partner_id=trade_partner_id,
+            history=[],
+            turn_count=0,
+        )
+        session.active_trade = active_trade
+        while True:
+            if active_trade.turn_count == 6:
+                self._write_trade_memory_entry(
+                    session.participant_ids,
+                    self._trade_cancellation_text(
+                        active_trade.initiator_id,
+                        active_trade.partner_id,
+                    ),
+                    game_time,
+                )
+                session.active_trade = None
+                return
+
+            turn_villager_id = self._trade_turn_villager_id(active_trade)
+            trade_result = await self._prompt_trade_turn(
+                turn_villager_id,
+                active_trade,
+                game_time,
+            )
+
+            if trade_result.action is TradeActionType.ACCEPT:
+                counterpart_id = self._trade_counterpart_id(active_trade, turn_villager_id)
+                counterpart_offer = self._latest_offer_from(
+                    active_trade.history,
+                    counterpart_id,
+                )
+                if counterpart_offer is None:
+                    active_trade.turn_count += 1
+                    continue
+                own_offer = self._latest_offer_from(active_trade.history, turn_villager_id)
+                self._transfer_trade_items(
+                    acceptor_id=turn_villager_id,
+                    counterpart_id=counterpart_id,
+                    acceptor_offer=own_offer.items if own_offer is not None else [],
+                    counterpart_offer=counterpart_offer.items,
+                )
+                self._write_trade_memory_entry(
+                    session.participant_ids,
+                    self._trade_completion_text(
+                        acceptor_id=turn_villager_id,
+                        counterpart_id=counterpart_id,
+                        acceptor_offer=own_offer.items if own_offer is not None else [],
+                        counterpart_offer=counterpart_offer.items,
+                    ),
+                    game_time,
+                )
+                session.active_trade = None
+                return
+
+            trade_record = TradeTurnRecord(
+                villager_id=turn_villager_id,
+                action=trade_result.action,
+                items=trade_result.items,
+                speech=trade_result.speech,
+            )
+            active_trade.history.append(trade_record)
+            active_trade.turn_count += 1
+            self._write_trade_memory_entry(
+                session.participant_ids,
+                self._trade_turn_text(trade_record),
+                game_time,
+            )
+            if (
+                trade_result.action is TradeActionType.CANCEL
+                and len(active_trade.history) > 1
+            ):
+                self._write_trade_memory_entry(
+                    session.participant_ids,
+                    self._trade_cancellation_text(
+                        active_trade.initiator_id,
+                        active_trade.partner_id,
+                    ),
+                    game_time,
+                )
+                session.active_trade = None
+                return
+
+    async def _prompt_trade_turn(
+        self,
+        villager_id: str,
+        active_trade: ActiveTrade,
+        game_time: int,
+    ) -> TradeTurnResult:
+        """Prompt one villager for a trade-turn result."""
+
+        ai_coordinator = self._require_ai_coordinator()
+        result_object = ai_coordinator.get_trade_turn(
+            villager_id,
+            TradeSnapshot(
+                other_villager_id=self._trade_counterpart_id(active_trade, villager_id),
+                history=active_trade.history,
+                turn_count=active_trade.turn_count,
+            ),
+            game_time,
+        )
+        result = cast(
+            TradeTurnResult,
+            await self._resolve_maybe_awaitable(result_object),
+        )
+        return result
+
+    @staticmethod
+    def _trade_turn_villager_id(active_trade: ActiveTrade) -> str:
+        """Return whose trade turn it is from turn-count parity."""
+
+        if active_trade.turn_count % 2 == 0:
+            return active_trade.initiator_id
+        return active_trade.partner_id
+
+    @staticmethod
+    def _trade_counterpart_id(active_trade: ActiveTrade, villager_id: str) -> str:
+        """Return the other participant in the active trade."""
+
+        if villager_id == active_trade.initiator_id:
+            return active_trade.partner_id
+        return active_trade.initiator_id
+
+    @staticmethod
+    def _latest_offer_from(
+        history: list[TradeTurnRecord],
+        villager_id: str,
+    ) -> TradeTurnRecord | None:
+        """Return one villager's most recent `MAKE_OFFER` record, if any."""
+
+        for record in reversed(history):
+            if (
+                record.villager_id == villager_id
+                and record.action is TradeActionType.MAKE_OFFER
+            ):
+                return record
+        return None
+
+    def _transfer_trade_items(
+        self,
+        acceptor_id: str,
+        counterpart_id: str,
+        acceptor_offer: list[TradeItemSpec],
+        counterpart_offer: list[TradeItemSpec],
+    ) -> None:
+        """Apply both inventory exchanges after validating all required removals."""
+
+        villager_states = self._require_villager_states()
+        acceptor_state = villager_states[acceptor_id]
+        counterpart_state = villager_states[counterpart_id]
+        acceptor_deltas = self._net_trade_deltas(
+            offered_items=acceptor_offer,
+            received_items=counterpart_offer,
+        )
+        counterpart_deltas = self._net_trade_deltas(
+            offered_items=counterpart_offer,
+            received_items=acceptor_offer,
+        )
+        self._validate_trade_deltas(acceptor_state, acceptor_deltas)
+        self._validate_trade_deltas(counterpart_state, counterpart_deltas)
+        self._apply_inventory_deltas(acceptor_state, acceptor_deltas)
+        self._apply_inventory_deltas(counterpart_state, counterpart_deltas)
+
+    @staticmethod
+    def _net_trade_deltas(
+        offered_items: list[TradeItemSpec],
+        received_items: list[TradeItemSpec],
+    ) -> dict[ItemType, int]:
+        """Collapse one side's offered and received items into net per-item deltas."""
+
+        deltas: dict[ItemType, int] = {}
+        for item_spec in offered_items:
+            deltas[item_spec.item] = deltas.get(item_spec.item, 0) - item_spec.quantity
+        for item_spec in received_items:
+            deltas[item_spec.item] = deltas.get(item_spec.item, 0) + item_spec.quantity
+        return deltas
+
+    @staticmethod
+    def _validate_trade_deltas(
+        villager_state: VillagerState,
+        deltas: dict[ItemType, int],
+    ) -> None:
+        """Ensure applying the supplied deltas will not make counts negative."""
+
+        for item, delta in deltas.items():
+            if delta >= 0:
+                continue
+            if villager_state.inventory.get(item, 0) + delta < 0:
+                raise ValueError(f"Inventory count for {item!r} cannot be negative.")
+
+    @staticmethod
+    def _apply_inventory_deltas(
+        villager_state: VillagerState,
+        deltas: dict[ItemType, int],
+    ) -> None:
+        """Apply one villager's validated item deltas."""
+
+        for item, delta in deltas.items():
+            if delta == 0:
+                continue
+            villager_state.modify_inventory(item, delta)
+
+    def _write_trade_memory_entry(
+        self,
+        participant_ids: list[str],
+        text: str,
+        game_time: int,
+    ) -> None:
+        """Append one trade event to every current conversation participant log."""
+
+        memory_system = self._require_memory_system()
+        entry = EventLogEntry(game_time=game_time, type=EventType.TRADE, text=text)
+        for participant_id in participant_ids:
+            memory_system.append_event(MemoryVillagerId(participant_id), entry)
+
+    def _trade_turn_text(self, trade_record: TradeTurnRecord) -> str:
+        """Render one logged trade-turn record into self-contained text."""
+
+        villager_name = self._villager_name(trade_record.villager_id)
+        action_text = self._trade_action_text(trade_record)
+        if trade_record.speech is None:
+            return f"{villager_name} {action_text}"
+        return f'{villager_name} {action_text} They say, "{trade_record.speech}"'
+
+    @staticmethod
+    def _trade_action_text(trade_record: TradeTurnRecord) -> str:
+        """Render the non-speech portion of one trade action."""
+
+        if trade_record.action is TradeActionType.MAKE_OFFER:
+            return f"offers {ConversationSystem._format_trade_items(trade_record.items)}."
+        if trade_record.action is TradeActionType.REQUEST_ITEMS:
+            return (
+                f"requests {ConversationSystem._format_trade_items(trade_record.items)}."
+            )
+        if trade_record.action is TradeActionType.CANCEL:
+            return "cancels the trade."
+        return "accepts the trade."
+
+    def _trade_completion_text(
+        self,
+        acceptor_id: str,
+        counterpart_id: str,
+        acceptor_offer: list[TradeItemSpec],
+        counterpart_offer: list[TradeItemSpec],
+    ) -> str:
+        """Render the completion event for one successful trade."""
+
+        acceptor_name = self._villager_name(acceptor_id)
+        counterpart_name = self._villager_name(counterpart_id)
+        return (
+            f"{acceptor_name} and {counterpart_name} complete the trade. "
+            f"{acceptor_name} receives {self._format_trade_items(counterpart_offer)}. "
+            f"{counterpart_name} receives {self._format_trade_items(acceptor_offer)}."
+        )
+
+    def _trade_cancellation_text(self, initiator_id: str, partner_id: str) -> str:
+        """Render the shared trade-cancelled event text."""
+
+        initiator_name = self._villager_name(initiator_id)
+        partner_name = self._villager_name(partner_id)
+        return f"{initiator_name} and {partner_name} end the trade without an exchange."
+
+    @staticmethod
+    def _format_trade_items(items: list[TradeItemSpec]) -> str:
+        """Render one item list as a compact comma-separated quantity string."""
+
+        if len(items) == 0:
+            return "nothing"
+        return ", ".join(f"{item.quantity} {item.item.name}" for item in items)
+
     @staticmethod
     def _winner_id(
         responses: dict[str, ConversationTurnResult],
@@ -390,16 +683,21 @@ class ConversationSystem:
         self,
         value: (
             Awaitable[ConversationTurnResult]
+            | Awaitable[TradeTurnResult]
             | Awaitable[bool]
             | ConversationTurnResult
+            | TradeTurnResult
             | bool
         ),
-    ) -> ConversationTurnResult | bool:
+    ) -> ConversationTurnResult | TradeTurnResult | bool:
         """Await asynchronous dependency results while preserving sync call support."""
 
         if inspect.isawaitable(value):
-            return await cast(Awaitable[ConversationTurnResult | bool], value)
-        return cast(ConversationTurnResult | bool, value)
+            return await cast(
+                Awaitable[ConversationTurnResult | TradeTurnResult | bool],
+                value,
+            )
+        return cast(ConversationTurnResult | TradeTurnResult | bool, value)
 
     def _require_ai_coordinator(self) -> _AICoordinatorProtocol:
         """Return the configured AI coordinator or fail fast."""
