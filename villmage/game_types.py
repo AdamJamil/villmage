@@ -101,6 +101,8 @@ StatName = Literal[
     "cleanliness",
 ]
 
+GameTime = int
+
 
 ITEM_WEIGHT_G: dict[ItemType, int] = {
     ItemType.PEACH: 150,
