@@ -12,6 +12,7 @@ from villmage.game_types import (
     ItemType,
     RestingSpotType,
     StatName,
+    WorldContext,
 )
 
 
@@ -90,6 +91,29 @@ def _is_sleeping(current_action: CurrentAction | None) -> bool:
         current_action is not None
         and current_action.category is ActionCategory.SLEEPING
     )
+
+
+def _compute_mood_value(
+    social_joy_pct: float,
+    connectedness_pct: float,
+    cleanliness_pct: float,
+    base_cleanliness: float,
+    rest_hours_since: float,
+) -> float:
+    """Compute the authored mood score from scaled component inputs."""
+
+    linear_term = 0.5 * social_joy_pct
+    linear_term += 0.2 * connectedness_pct
+    linear_term += 0.2 * cleanliness_pct
+    linear_term += 0.1 * base_cleanliness
+    geometric_term = (
+        social_joy_pct**10
+        * connectedness_pct**4
+        * cleanliness_pct**4
+        * base_cleanliness**2
+    ) ** (1.0 / 22.0)
+    rest_term = (0.3 / 5.0) * max(0.0, 5.0 - rest_hours_since)
+    return min(1.0, (0.5 * linear_term) + (0.5 * geometric_term) + rest_term)
 
 
 class VillagerState:
@@ -213,6 +237,167 @@ class VillagerState:
             * (hydration_pct**3)
         ) ** (1.0 / 9.0)
         return _clamp(health, 0.0, 1.0)
+
+    def compute_stats(self, ctx: WorldContext) -> ComputedStats:
+        """Assemble the full derived-stat bundle from raw state and world context."""
+
+        wakefulness_pct = self.wakefulness / 100.0
+        satiation_pct = self.satiation / 1800.0
+        hydration_pct = self.hydration / 6000.0
+        social_joy_pct = self.social_joy / 100.0
+        connectedness_pct = self.connectedness / 100.0
+        cleanliness_pct = self.cleanliness / 100.0
+        base_cleanliness = max(0.0, 1.0 - (ctx.total_dirtiness / 100.0))
+        health = self._compute_health()
+        rest_hours_since = (
+            (ctx.current_game_time - self.last_rest_game_time) / 60.0
+            if self.last_rest_game_time is not None
+            else 999.0
+        )
+        mood = _compute_mood_value(
+            social_joy_pct=social_joy_pct,
+            connectedness_pct=connectedness_pct,
+            cleanliness_pct=cleanliness_pct,
+            base_cleanliness=base_cleanliness,
+            rest_hours_since=rest_hours_since,
+        )
+        inventory_calories = (self.inventory.get(ItemType.PEACH, 0) * 60) + (
+            self.inventory.get(ItemType.COOKED_MEAT, 0) * 800
+        )
+        food_safety = (
+            (inventory_calories / 2200.0)
+            + ((1.0 / ctx.villager_count) * (ctx.base_calories / 2200.0))
+        ) / 5.0
+        fire_safety = (ctx.total_fuel_minutes / 480.0) / 5.0
+        safety = (food_safety + fire_safety) / 2.0
+        well_being = min(
+            1.0,
+            (mood**2 * health**3 * max(0.3, safety)) ** (1.0 / 7.0),
+        )
+        return ComputedStats(
+            well_being=well_being,
+            mood=mood,
+            health=health,
+            safety=safety,
+            wakefulness_pct=wakefulness_pct,
+            satiation_pct=satiation_pct,
+            hydration_pct=hydration_pct,
+            social_joy_pct=social_joy_pct,
+            connectedness_pct=connectedness_pct,
+            cleanliness_pct=cleanliness_pct,
+            base_cleanliness=base_cleanliness,
+            dominant_mood_input=self._dominant_mood_input(
+                social_joy_pct,
+                connectedness_pct,
+                cleanliness_pct,
+                base_cleanliness,
+                rest_hours_since,
+            ),
+            dominant_health_input=self._dominant_health_input(
+                wakefulness_pct,
+                satiation_pct,
+                hydration_pct,
+            ),
+        )
+
+    def _dominant_mood_input(
+        self,
+        sj: float,
+        cn: float,
+        cl: float,
+        bc: float,
+        r: float,
+    ) -> MoodSubcomponent:
+        """Return the mood input with the largest partial-derivative magnitude."""
+
+        epsilon = 1e-4
+        baseline = _compute_mood_value(sj, cn, cl, bc, r)
+        gradients: list[tuple[MoodSubcomponent, float]] = [
+            (
+                MoodSubcomponent.SOCIAL_JOY,
+                abs(_compute_mood_value(sj + epsilon, cn, cl, bc, r) - baseline),
+            ),
+            (
+                MoodSubcomponent.CONNECTEDNESS,
+                abs(_compute_mood_value(sj, cn + epsilon, cl, bc, r) - baseline),
+            ),
+            (
+                MoodSubcomponent.CLEANLINESS,
+                abs(_compute_mood_value(sj, cn, cl + epsilon, bc, r) - baseline),
+            ),
+            (
+                MoodSubcomponent.BASE_CLEANLINESS,
+                abs(_compute_mood_value(sj, cn, cl, bc + epsilon, r) - baseline),
+            ),
+            (
+                MoodSubcomponent.REST,
+                0.06 if r < 5.0 else 0.0,
+            ),
+        ]
+        return max(gradients, key=lambda pair: pair[1])[0]
+
+    def _dominant_health_input(
+        self,
+        w: float,
+        s: float,
+        h: float,
+    ) -> HealthSubcomponent:
+        """Return the health input with the largest partial-derivative magnitude."""
+
+        epsilon = 1e-4
+        satiation_term = (32.0 ** (s - 1.0)) - (1.0 / 32.0)
+        baseline = _clamp(
+            (max(0.1, w) * (satiation_term**3) * (h**3)) ** (1.0 / 9.0),
+            0.0,
+            1.0,
+        )
+        gradients: list[tuple[HealthSubcomponent, float]] = [
+            (
+                HealthSubcomponent.WAKEFULNESS,
+                abs(
+                    _clamp(
+                        (
+                            max(0.1, w + epsilon)
+                            * (satiation_term**3)
+                            * (h**3)
+                        )
+                        ** (1.0 / 9.0),
+                        0.0,
+                        1.0,
+                    )
+                    - baseline
+                ),
+            ),
+            (
+                HealthSubcomponent.SATIATION,
+                abs(
+                    _clamp(
+                        (
+                            max(0.1, w)
+                            * ((((32.0 ** ((s + epsilon) - 1.0)) - (1.0 / 32.0)) ** 3))
+                            * (h**3)
+                        )
+                        ** (1.0 / 9.0),
+                        0.0,
+                        1.0,
+                    )
+                    - baseline
+                ),
+            ),
+            (
+                HealthSubcomponent.HYDRATION,
+                abs(
+                    _clamp(
+                        (max(0.1, w) * (satiation_term**3) * ((h + epsilon) ** 3))
+                        ** (1.0 / 9.0),
+                        0.0,
+                        1.0,
+                    )
+                    - baseline
+                ),
+            ),
+        ]
+        return max(gradients, key=lambda pair: pair[1])[0]
 
     def apply_decay(self, elapsed_hours: float) -> DecayResult:
         """Apply passive stat decay for one interval and report threshold crossings."""

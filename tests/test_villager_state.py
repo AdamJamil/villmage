@@ -10,8 +10,15 @@ from villmage.game_types import (
     ItemType,
     RestingSpotType,
     StatName,
+    WorldContext,
 )
-from villmage.villager_state import CraftingProgress, CurrentAction, VillagerState
+from villmage.villager_state import (
+    CraftingProgress,
+    CurrentAction,
+    HealthSubcomponent,
+    MoodSubcomponent,
+    VillagerState,
+)
 
 
 def _get_stat_value(villager_state: VillagerState, stat_name: StatName) -> float:
@@ -531,3 +538,306 @@ def test_compute_health_matches_numeric_spot_check() -> None:
     ) ** (1.0 / 9.0)
 
     assert villager_state._compute_health() == pytest.approx(expected, abs=1e-6)
+
+
+def _world_context(
+    *,
+    base_calories: int = 0,
+    total_fuel_minutes: int = 0,
+    villager_count: int = 1,
+    total_dirtiness: int = 0,
+    current_game_time: int = 0,
+) -> WorldContext:
+    """Build a minimal WorldContext with override-friendly defaults."""
+
+    return WorldContext(
+        base_calories=base_calories,
+        total_fuel_minutes=total_fuel_minutes,
+        villager_count=villager_count,
+        total_dirtiness=total_dirtiness,
+        current_game_time=current_game_time,
+    )
+
+
+def test_compute_stats_component_percentages_and_base_cleanliness() -> None:
+    """Component percentages and base cleanliness follow the authored scales."""
+
+    villager_state = VillagerState("aldric")
+
+    clean_stats = villager_state.compute_stats(_world_context(total_dirtiness=0))
+
+    assert clean_stats.wakefulness_pct == 1.0
+    assert clean_stats.satiation_pct == 1.0
+    assert clean_stats.hydration_pct == 1.0
+    assert clean_stats.social_joy_pct == 0.2
+    assert clean_stats.connectedness_pct == 1.0
+    assert clean_stats.cleanliness_pct == 1.0
+    assert clean_stats.base_cleanliness == 1.0
+
+    dirty_stats = villager_state.compute_stats(_world_context(total_dirtiness=100))
+
+    assert dirty_stats.base_cleanliness == 0.0
+
+
+def test_compute_stats_base_cleanliness_is_floored_at_zero() -> None:
+    """Base cleanliness never goes negative even above the dirtiness cap."""
+
+    villager_state = VillagerState("aldric")
+
+    computed = villager_state.compute_stats(_world_context(total_dirtiness=150))
+
+    assert computed.base_cleanliness == 0.0
+
+
+def test_compute_stats_mood_is_one_at_full_components_with_rest() -> None:
+    """The full-components mood case clamps the authored 1.3 result to one."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.social_joy = 100.0
+    villager_state.set_last_rest_time(120)
+
+    computed = villager_state.compute_stats(_world_context(current_game_time=120))
+
+    assert computed.mood == 1.0
+
+
+def test_compute_stats_mood_excludes_rest_term_when_no_rest_timestamp() -> None:
+    """Missing rest time behaves like the spec's far-in-the-past sentinel."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.social_joy = 40.0
+    villager_state.connectedness = 50.0
+    villager_state.cleanliness = 80.0
+
+    computed = villager_state.compute_stats(_world_context(total_dirtiness=20))
+    expected = min(
+        1.0,
+        0.5 * ((0.5 * 0.4) + (0.2 * 0.5) + (0.2 * 0.8) + (0.1 * 0.8))
+        + 0.5 * ((0.4**10 * 0.5**4 * 0.8**4 * 0.8**2) ** (1.0 / 22.0)),
+    )
+
+    assert computed.mood == pytest.approx(expected, abs=1e-6)
+
+
+def test_compute_stats_mood_rest_buff_adds_expected_delta() -> None:
+    """Recent rest adds exactly the authored linear buff contribution."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.social_joy = 30.0
+    villager_state.connectedness = 40.0
+    villager_state.cleanliness = 50.0
+    villager_state.set_last_rest_time(0)
+
+    without_rest = villager_state.compute_stats(
+        _world_context(total_dirtiness=25, current_game_time=999 * 60)
+    )
+    with_rest = villager_state.compute_stats(
+        _world_context(total_dirtiness=25, current_game_time=120)
+    )
+
+    assert with_rest.mood - without_rest.mood == pytest.approx(0.18, abs=1e-6)
+
+
+def test_compute_stats_mood_geometric_term_collapses_to_zero_cleanly() -> None:
+    """A zero multiplicative mood input removes only the geometric contribution."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.social_joy = 0.0
+    villager_state.connectedness = 80.0
+    villager_state.cleanliness = 60.0
+    villager_state.set_last_rest_time(0)
+
+    computed = villager_state.compute_stats(
+        _world_context(total_dirtiness=30, current_game_time=120)
+    )
+    expected = (0.5 * ((0.2 * 0.8) + (0.2 * 0.6) + (0.1 * 0.7))) + 0.18
+
+    assert computed.mood == pytest.approx(expected, abs=1e-6)
+
+
+def test_compute_stats_health_matches_private_helper() -> None:
+    """compute_stats delegates health to the same helper used by decay."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.wakefulness = 70.0
+    villager_state.satiation = 1200.0
+    villager_state.hydration = 2400.0
+
+    computed = villager_state.compute_stats(_world_context())
+
+    assert computed.health == pytest.approx(villager_state._compute_health(), abs=1e-9)
+
+
+def test_compute_stats_safety_is_not_clamped() -> None:
+    """Large stockpiles can push safety above one."""
+
+    villager_state = VillagerState("aldric")
+
+    computed = villager_state.compute_stats(
+        _world_context(base_calories=220_000, total_fuel_minutes=48_000, villager_count=1)
+    )
+
+    assert computed.safety > 1.0
+
+
+def test_compute_stats_well_being_is_clamped_at_one() -> None:
+    """Well-being clamps even when uncapped safety would push it above one."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.social_joy = 100.0
+    villager_state.set_last_rest_time(0)
+
+    computed = villager_state.compute_stats(
+        _world_context(
+            base_calories=220_000,
+            total_fuel_minutes=48_000,
+            villager_count=1,
+            current_game_time=0,
+        )
+    )
+
+    assert computed.well_being == 1.0
+
+
+def test_compute_stats_well_being_uses_safety_floor_of_point_three() -> None:
+    """Zero safety still contributes the authored 0.3 floor to well-being."""
+
+    villager_state = VillagerState("aldric")
+    villager_state.social_joy = 60.0
+    villager_state.connectedness = 50.0
+    villager_state.cleanliness = 75.0
+
+    computed = villager_state.compute_stats(_world_context(villager_count=1))
+    expected = min(
+        1.0,
+        (computed.mood**2 * computed.health**3 * 0.3) ** (1.0 / 7.0),
+    )
+
+    assert computed.safety == 0.0
+    assert computed.well_being == pytest.approx(expected, abs=1e-6)
+
+
+def test_dominant_mood_input_can_select_social_joy() -> None:
+    """Social joy can dominate the mood gradient."""
+
+    villager_state = VillagerState("aldric")
+
+    dominant = villager_state._dominant_mood_input(0.001, 1.0, 1.0, 1.0, 999.0)
+
+    assert dominant is MoodSubcomponent.SOCIAL_JOY
+
+
+def test_dominant_mood_input_can_select_connectedness() -> None:
+    """Connectedness can dominate the mood gradient."""
+
+    villager_state = VillagerState("aldric")
+
+    dominant = villager_state._dominant_mood_input(1.0, 0.001, 1.0, 1.0, 999.0)
+
+    assert dominant is MoodSubcomponent.CONNECTEDNESS
+
+
+def test_dominant_mood_input_can_select_cleanliness() -> None:
+    """Cleanliness can dominate the mood gradient."""
+
+    villager_state = VillagerState("aldric")
+
+    dominant = villager_state._dominant_mood_input(1.0, 1.0, 0.001, 1.0, 999.0)
+
+    assert dominant is MoodSubcomponent.CLEANLINESS
+
+
+def test_dominant_mood_input_can_select_base_cleanliness() -> None:
+    """Base cleanliness can dominate the mood gradient."""
+
+    villager_state = VillagerState("aldric")
+
+    dominant = villager_state._dominant_mood_input(1.0, 1.0, 1.0, 0.001, 999.0)
+
+    assert dominant is MoodSubcomponent.BASE_CLEANLINESS
+
+
+def test_dominant_mood_input_can_select_rest() -> None:
+    """Rest wins when its analytical derivative exceeds the others."""
+
+    villager_state = VillagerState("aldric")
+
+    dominant = villager_state._dominant_mood_input(1.0, 1.0, 1.0, 1.0, 0.0)
+
+    assert dominant is MoodSubcomponent.REST
+
+
+def test_dominant_mood_input_never_selects_rest_at_or_after_five_hours() -> None:
+    """REST has zero derivative magnitude once the buff window ends."""
+
+    villager_state = VillagerState("aldric")
+
+    dominant = villager_state._dominant_mood_input(1.0, 1.0, 1.0, 1.0, 5.0)
+
+    assert dominant is not MoodSubcomponent.REST
+
+
+def test_dominant_mood_input_breaks_ties_by_enum_order() -> None:
+    """Near-equal gradients resolve to the earlier-declared mood enum."""
+
+    villager_state = VillagerState("aldric")
+
+    dominant = villager_state._dominant_mood_input(1.0, 1e-8, 1e-8, 1.0, 999.0)
+
+    assert dominant is MoodSubcomponent.CONNECTEDNESS
+
+
+def test_dominant_health_input_responds_to_wakefulness_above_the_floor() -> None:
+    """Wakefulness contributes a non-zero gradient once it rises above the floor."""
+
+    villager_state = VillagerState("aldric")
+    epsilon = 1e-4
+    wakefulness_pct = 0.1001
+    satiation_pct = 1.0
+    hydration_pct = 1.0
+    villager_state.wakefulness = wakefulness_pct * 100.0
+    villager_state.satiation = satiation_pct * 1800.0
+    villager_state.hydration = hydration_pct * 6000.0
+
+    baseline = villager_state._compute_health()
+    villager_state.wakefulness = (wakefulness_pct + epsilon) * 100.0
+    perturbed = villager_state._compute_health()
+    dominant = villager_state._dominant_health_input(
+        wakefulness_pct,
+        satiation_pct,
+        hydration_pct,
+    )
+
+    assert perturbed > baseline
+    assert dominant is not HealthSubcomponent.WAKEFULNESS
+
+
+def test_dominant_health_input_can_select_satiation() -> None:
+    """Satiation can dominate the health gradient."""
+
+    villager_state = VillagerState("aldric")
+
+    dominant = villager_state._dominant_health_input(1.0, 0.001, 1.0)
+
+    assert dominant is HealthSubcomponent.SATIATION
+
+
+def test_dominant_health_input_can_select_hydration() -> None:
+    """Hydration can dominate the health gradient."""
+
+    villager_state = VillagerState("aldric")
+
+    dominant = villager_state._dominant_health_input(1.0, 1.0, 0.001)
+
+    assert dominant is HealthSubcomponent.HYDRATION
+
+
+def test_compute_stats_populates_dominant_input_fields() -> None:
+    """compute_stats returns valid dominant-subcomponent enum values."""
+
+    villager_state = VillagerState("aldric")
+
+    computed = villager_state.compute_stats(_world_context())
+
+    assert isinstance(computed.dominant_mood_input, MoodSubcomponent)
+    assert isinstance(computed.dominant_health_input, HealthSubcomponent)
