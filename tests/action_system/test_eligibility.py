@@ -7,6 +7,8 @@ from __future__ import annotations
 from action_system.eligibility import (
     eating_and_drinking_actions,
     exploration_actions,
+    fire_tending_actions,
+    misc_actions,
     rest_action,
     resting_spot_actions,
     storage_actions,
@@ -15,7 +17,7 @@ from action_system.types import ActionContext, ActionType, AutobalanceMultiplier
 from character_canon.canon import CharacterCanon
 from villmage.game_types import ItemType, RestingSpotType
 from villmage.villager_state import VillagerState
-from villmage.world_state import WorldState
+from villmage.world_state import DirtinessSource, FuelType, WorldState
 
 
 def make_ctx(villager_id: str = "harren") -> ActionContext:
@@ -391,3 +393,158 @@ def test_resting_spot_actions_allow_both_spot_types_when_neither_is_placed() -> 
         ActionType.PLACE_BED_ROLL,
         ActionType.PLACE_COT,
     }
+
+
+def test_fire_tending_actions_show_light_fire_without_fuel() -> None:
+    """An unlit fire still shows light-fire even when no fuel can be added."""
+
+    actions = fire_tending_actions(make_ctx())
+
+    assert _get_action(actions, ActionType.ADD_STICKS) is None
+    assert _get_action(actions, ActionType.ADD_FIREWOOD) is None
+    assert _get_action(actions, ActionType.LIGHT_FIRE) is not None
+    assert _get_action(actions, ActionType.EXTINGUISH_FIRE) is None
+
+
+def test_fire_tending_actions_add_sticks_from_inventory_when_available() -> None:
+    """Stick quantity uses the available total when the cap leaves room."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.STICK, 5)
+
+    actions = fire_tending_actions(ctx)
+    add_sticks = _get_action(actions, ActionType.ADD_STICKS)
+
+    assert add_sticks is not None
+    assert "1-5" in add_sticks.prompt_text
+    assert _get_action(actions, ActionType.LIGHT_FIRE) is not None
+    assert _get_action(actions, ActionType.ADD_FIREWOOD) is None
+
+
+def test_fire_tending_actions_add_firewood_from_base_when_fire_is_lit() -> None:
+    """Firewood availability may come entirely from base storage."""
+
+    ctx = make_ctx()
+    ctx.ws.modify_base_item(ItemType.FIREWOOD, 3)
+    ctx.ws.add_fire_fuel(FuelType.FIREWOOD, 3, current_time=0)
+    ctx.ws.light_fire(current_time=0)
+
+    actions = fire_tending_actions(ctx)
+    add_firewood = _get_action(actions, ActionType.ADD_FIREWOOD)
+
+    assert add_firewood is not None
+    assert "1-3" in add_firewood.prompt_text
+    assert _get_action(actions, ActionType.EXTINGUISH_FIRE) is not None
+    assert _get_action(actions, ActionType.LIGHT_FIRE) is None
+
+
+def test_fire_tending_actions_limit_added_firewood_by_four_hour_cap() -> None:
+    """Fuel-add ranges stop at the largest quantity that fits under the cap."""
+
+    ctx = make_ctx()
+    ctx.ws.add_fire_fuel(FuelType.FIREWOOD, 10, current_time=0)
+    ctx.ws.light_fire(current_time=0)
+    ctx.ws.modify_base_item(ItemType.FIREWOOD, 12)
+
+    add_firewood = _get_action(fire_tending_actions(ctx), ActionType.ADD_FIREWOOD)
+
+    assert add_firewood is not None
+    assert "1-2" in add_firewood.prompt_text
+    assert "1-12" not in add_firewood.prompt_text
+
+
+def test_fire_tending_actions_omit_fuel_adds_when_fire_is_already_at_cap() -> None:
+    """No fuel-add actions appear when remaining burn time is already full."""
+
+    ctx = make_ctx()
+    ctx.ws.add_fire_fuel(FuelType.FIREWOOD, 12, current_time=0)
+    ctx.ws.light_fire(current_time=0)
+    ctx.vs.modify_inventory(ItemType.STICK, 5)
+    ctx.ws.modify_base_item(ItemType.FIREWOOD, 5)
+
+    actions = fire_tending_actions(ctx)
+
+    assert _get_action(actions, ActionType.ADD_STICKS) is None
+    assert _get_action(actions, ActionType.ADD_FIREWOOD) is None
+
+
+def test_fire_tending_actions_show_remaining_minutes_inline_for_fuel_adds() -> None:
+    """Fuel-add prompts include the current remaining-burn figure inline."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.STICK, 2)
+
+    add_sticks = _get_action(fire_tending_actions(ctx), ActionType.ADD_STICKS)
+
+    assert add_sticks is not None
+    assert "0" in add_sticks.prompt_text
+
+
+def test_misc_actions_add_scrape_hide_for_inventory_raw_hide() -> None:
+    """Inventory raw hide produces one scrape-hide quantity range."""
+
+    ctx = make_ctx()
+    ctx.vs.modify_inventory(ItemType.RAW_HIDE, 2)
+
+    scrape_hide = _get_action(misc_actions(ctx), ActionType.SCRAPE_HIDE)
+
+    assert scrape_hide is not None
+    assert "1-2" in scrape_hide.prompt_text
+
+
+def test_misc_actions_add_scrape_hide_for_base_raw_hide() -> None:
+    """Base-only raw hide still produces the combined-count scrape action."""
+
+    ctx = make_ctx()
+    ctx.ws.modify_base_item(ItemType.RAW_HIDE, 3)
+
+    scrape_hide = _get_action(misc_actions(ctx), ActionType.SCRAPE_HIDE)
+
+    assert scrape_hide is not None
+    assert "1-3" in scrape_hide.prompt_text
+
+
+def test_misc_actions_always_include_haul_water() -> None:
+    """Haul water has no prerequisite and always appears."""
+
+    assert _get_action(misc_actions(make_ctx()), ActionType.HAUL_WATER) is not None
+
+
+def test_misc_actions_only_include_butcher_when_live_carcass_exists() -> None:
+    """Butchering requires at least one tracked live carcass."""
+
+    ctx = make_ctx()
+
+    assert _get_action(misc_actions(ctx), ActionType.BUTCHER_CARCASS) is None
+
+    ctx.ws.add_carcass(0)
+
+    assert _get_action(misc_actions(ctx), ActionType.BUTCHER_CARCASS) is not None
+
+
+def test_misc_actions_only_include_clean_camp_when_dirty() -> None:
+    """Clean camp appears only when the camp has positive total dirtiness."""
+
+    ctx = make_ctx()
+
+    assert _get_action(misc_actions(ctx), ActionType.CLEAN_CAMP) is None
+
+    ctx.ws.update_cleanliness_source(DirtinessSource.CARCASS_REMAINS, 1)
+    clean_camp = _get_action(misc_actions(ctx), ActionType.CLEAN_CAMP)
+
+    assert clean_camp is not None
+    assert "30" in clean_camp.prompt_text
+
+
+def test_misc_actions_only_include_split_logs_when_logs_exist() -> None:
+    """Log splitting requires at least one combined inventory/base log."""
+
+    ctx = make_ctx()
+
+    assert _get_action(misc_actions(ctx), ActionType.SPLIT_LOGS) is None
+
+    ctx.ws.modify_base_item(ItemType.LOG, 2)
+    split_logs = _get_action(misc_actions(ctx), ActionType.SPLIT_LOGS)
+
+    assert split_logs is not None
+    assert "1-2" in split_logs.prompt_text

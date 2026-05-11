@@ -13,6 +13,7 @@ from action_system.types import (
 )
 from character_canon.types import Profession, VillagerId
 from villmage.game_types import ITEM_WEIGHT_G, ItemType, RestingSpotType
+from villmage.world_state import FUEL_BURN_DURATION_MINUTES, item_type_to_fuel_type
 
 
 _EXPLORATION_ITEM_BY_RESOURCE: dict[ExploreResource, ItemType] = {
@@ -48,6 +49,36 @@ def _resource_name(resource: ExploreResource) -> str:
     """Return one exploration resource as the lower-case prompt-facing label."""
 
     return resource.name.lower()
+
+
+def _total_available_item_count(ctx: ActionContext, item: ItemType) -> int:
+    """Return the combined inventory-plus-base count for one item type."""
+
+    return ctx.vs.inventory.get(item, 0) + ctx.ws.get_base_item_count(item)
+
+
+def _remaining_fire_minutes(ctx: ActionContext) -> int:
+    """Return the authored fire-minutes snapshot available to eligibility."""
+
+    if ctx.ws.fire.lit:
+        extinction_timestamp = ctx.ws.fire.extinction_timestamp
+        if extinction_timestamp is None:
+            return 0
+        return extinction_timestamp
+    return sum(
+        unit.quantity * FUEL_BURN_DURATION_MINUTES[unit.fuel_type]
+        for unit in ctx.ws.fire.fuel_queue
+    )
+
+
+def _max_addable_fuel_units(ctx: ActionContext, item: ItemType) -> int:
+    """Return the largest quantity of this fuel that fits under the fire cap."""
+
+    remaining_capacity = 240 - _remaining_fire_minutes(ctx)
+    if remaining_capacity <= 0:
+        return 0
+    fuel_minutes = FUEL_BURN_DURATION_MINUTES[item_type_to_fuel_type(item)]
+    return remaining_capacity // fuel_minutes
 
 
 def _has_placed_spot(
@@ -269,3 +300,106 @@ def rest_action(ctx: ActionContext) -> list[ValidAction]:
             selectable=True,
         )
     ]
+
+
+def fire_tending_actions(ctx: ActionContext) -> list[ValidAction]:
+    """Return authored fire-tending entries gated by fuel, cap, and lit state."""
+
+    actions: list[ValidAction] = []
+    remaining_fire_minutes = _remaining_fire_minutes(ctx)
+
+    for item, action_type in (
+        (ItemType.STICK, ActionType.ADD_STICKS),
+        (ItemType.FIREWOOD, ActionType.ADD_FIREWOOD),
+    ):
+        available_count = _total_available_item_count(ctx, item)
+        max_addable_count = min(available_count, _max_addable_fuel_units(ctx, item))
+        if max_addable_count <= 0:
+            continue
+        actions.append(
+            ValidAction(
+                action_type=action_type,
+                prompt_text=(
+                    f"Add {_item_name(item)} "
+                    f'{_range_spec("quantity", max_addable_count)} '
+                    f"({remaining_fire_minutes} min remaining)"
+                ),
+                selectable=True,
+            )
+        )
+
+    if ctx.ws.is_fire_lit():
+        actions.append(
+            ValidAction(
+                action_type=ActionType.EXTINGUISH_FIRE,
+                prompt_text="Extinguish fire",
+                selectable=True,
+            )
+        )
+    else:
+        actions.append(
+            ValidAction(
+                action_type=ActionType.LIGHT_FIRE,
+                prompt_text="Light fire (10 minutes)",
+                selectable=True,
+            )
+        )
+
+    return actions
+
+
+def misc_actions(ctx: ActionContext) -> list[ValidAction]:
+    """Return authored miscellaneous base actions whose prerequisites are met."""
+
+    actions: list[ValidAction] = []
+
+    raw_hide_count = _total_available_item_count(ctx, ItemType.RAW_HIDE)
+    if raw_hide_count > 0:
+        actions.append(
+            ValidAction(
+                action_type=ActionType.SCRAPE_HIDE,
+                prompt_text=f'Scrape hide {_range_spec("quantity", raw_hide_count)} (1 hour each)',
+                selectable=True,
+            )
+        )
+
+    actions.append(
+        ValidAction(
+            action_type=ActionType.HAUL_WATER,
+            prompt_text="Haul water (2 hours)",
+            selectable=True,
+        )
+    )
+
+    if len(ctx.ws.live_carcasses) > 0:
+        actions.append(
+            ValidAction(
+                action_type=ActionType.BUTCHER_CARCASS,
+                prompt_text="Butcher carcass (2 hours)",
+                selectable=True,
+            )
+        )
+
+    total_dirtiness = ctx.ws.get_total_dirtiness()
+    if total_dirtiness > 0:
+        actions.append(
+            ValidAction(
+                action_type=ActionType.CLEAN_CAMP,
+                prompt_text=(
+                    f"Clean camp ({total_dirtiness} dirtiness, {total_dirtiness} minutes)"
+                ),
+                selectable=True,
+            )
+        )
+
+    log_count = _total_available_item_count(ctx, ItemType.LOG)
+    if log_count > 0:
+        actions.append(
+            ValidAction(
+                action_type=ActionType.SPLIT_LOGS,
+                prompt_text=f'Split logs {_range_spec("quantity", log_count)}',
+                selectable=True,
+            )
+        )
+
+    return actions
