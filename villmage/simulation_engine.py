@@ -453,15 +453,56 @@ class SimulationEngine:
             )
         )
 
+    def _pending_action_completion_timestamp(
+        self,
+        villager_id: VillagerId,
+    ) -> int | None:
+        """Return one villager's pending action-complete timestamp if present."""
+
+        for event in self.event_heap:
+            if (
+                isinstance(event, ActionCompleteEvent)
+                and event.villager_id == villager_id
+            ):
+                return event.timestamp
+        return None
+
     def _handle_conversation_action(
         self,
         initiator_id: VillagerId,
         target_id: VillagerId,
     ) -> None:
-        """Run the authored conversation branch once it is implemented."""
+        """Run one conversation and shift paused participants' deadlines forward."""
 
-        del initiator_id, target_id
-        raise NotImplementedError("Conversation handling is implemented in the next diff.")
+        elapsed_minutes, participant_ids = cast(
+            tuple[int, list[VillagerId]],
+            self._resolve_awaitable(
+                self.conversation_system.run_conversation(
+                    initiator_id,
+                    target_id,
+                    self.current_game_time,
+                )
+            ),
+        )
+        for participant_id in participant_ids:
+            if participant_id == initiator_id:
+                continue
+            completion_timestamp = self._pending_action_completion_timestamp(
+                participant_id
+            )
+            if completion_timestamp is None:
+                continue
+            self._cancel(
+                lambda event: isinstance(event, ActionCompleteEvent)
+                and event.villager_id == participant_id
+            )
+            self._push(
+                ActionCompleteEvent(
+                    timestamp=completion_timestamp + elapsed_minutes,
+                    sequence=-1,
+                    villager_id=participant_id,
+                )
+            )
 
     @staticmethod
     def _inventory_edible_calories(villager_state: VillagerState) -> int:
