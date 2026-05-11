@@ -103,6 +103,22 @@ def _trade_session(participant_ids: list[str], elapsed_game_minutes: int) -> Con
     )
 
 
+def _loop_session(
+    participant_ids: list[str],
+    elapsed_game_minutes: int = 0,
+) -> ConversationSession:
+    """Build a minimal conversation session for turn-loop tests."""
+
+    return ConversationSession(
+        participant_ids=list(participant_ids),
+        all_participant_ids=list(participant_ids),
+        full_turn_log=[],
+        join_turn_index={villager_id: 0 for villager_id in participant_ids},
+        elapsed_game_minutes=elapsed_game_minutes,
+        last_spoke_turn={},
+    )
+
+
 @pytest.mark.parametrize(
     ("action", "response"),
     [
@@ -960,3 +976,203 @@ def test_run_trade_subprotocol_honors_explicit_cancel_without_inventory_transfer
         "Partner cancels the trade.",
         "Initiator and Partner end the trade without an exchange.",
     ]
+
+
+def test_run_turn_loop_stops_when_participants_drop_to_one() -> None:
+    """The loop exits immediately after a turn leaves one participant remaining."""
+
+    system = ConversationSystem()
+    session = _loop_session(["alpha", "beta"])
+    resolve_call_count = 0
+
+    async def _resolve(_session: ConversationSession, _game_time: int) -> ConversationTurnResult | None:
+        """Drop to one participant on the first resolved turn."""
+
+        nonlocal resolve_call_count
+        resolve_call_count += 1
+        session.participant_ids = ["beta"]
+        return None
+
+    setattr(system, "_resolve_single_turn", _resolve)
+
+    asyncio.run(system._run_turn_loop(session, 300))
+
+    assert resolve_call_count == 1
+    assert session.elapsed_game_minutes == 5
+
+
+def test_run_turn_loop_stops_at_exactly_sixty_minutes_without_turn_thirteen() -> None:
+    """Twelve turns consume the full hour and the loop does not start a thirteenth."""
+
+    system = ConversationSystem()
+    session = _loop_session(["alpha", "beta"])
+    resolve_call_count = 0
+    pause_call_count = 0
+
+    async def _resolve(_session: ConversationSession, _game_time: int) -> ConversationTurnResult | None:
+        """Append one logged turn each time and keep the roster active."""
+
+        nonlocal resolve_call_count
+        resolve_call_count += 1
+        session.full_turn_log.append(
+            ConversationTurn(
+                villager_id="alpha",
+                text=f"Turn {resolve_call_count}.",
+            )
+        )
+        return None
+
+    async def _pause(_session: ConversationSession, _game_time: int) -> None:
+        """Record one join-pause invocation without mutating the session."""
+
+        nonlocal pause_call_count
+        pause_call_count += 1
+
+    setattr(system, "_resolve_single_turn", _resolve)
+    setattr(system, "_pause_for_joiners", _pause)
+
+    asyncio.run(system._run_turn_loop(session, 305))
+
+    assert resolve_call_count == 12
+    assert session.elapsed_game_minutes == 60
+    assert pause_call_count == 1
+
+
+def test_run_turn_loop_exits_cleanly_when_both_end_conditions_become_true() -> None:
+    """The loop handles simultaneous roster and time termination in one return path."""
+
+    system = ConversationSystem()
+    session = _loop_session(["alpha", "beta"], elapsed_game_minutes=55)
+    resolve_call_count = 0
+
+    async def _resolve(_session: ConversationSession, _game_time: int) -> ConversationTurnResult | None:
+        """Force the final participant drop on the turn that reaches sixty minutes."""
+
+        nonlocal resolve_call_count
+        resolve_call_count += 1
+        session.participant_ids = ["alpha"]
+        return None
+
+    setattr(system, "_resolve_single_turn", _resolve)
+
+    asyncio.run(system._run_turn_loop(session, 310))
+
+    assert resolve_call_count == 1
+    assert session.participant_ids == ["alpha"]
+    assert session.elapsed_game_minutes == 60
+
+
+def test_run_turn_loop_counts_silent_turns_toward_elapsed_minutes() -> None:
+    """Elapsed game time advances by five minutes even when a turn is silent."""
+
+    system = ConversationSystem()
+    session = _loop_session(["alpha", "beta"])
+    resolve_call_count = 0
+
+    async def _resolve(_session: ConversationSession, _game_time: int) -> ConversationTurnResult | None:
+        """Return one silent turn, then one final voiced turn."""
+
+        nonlocal resolve_call_count
+        resolve_call_count += 1
+        if resolve_call_count == 1:
+            return None
+        session.full_turn_log.append(ConversationTurn(villager_id="beta", text="Beta: Done."))
+        session.participant_ids = ["beta"]
+        return ConversationTurnResult(action=ConvActionType.RESPOND, resp="Done.")
+
+    setattr(system, "_resolve_single_turn", _resolve)
+
+    asyncio.run(system._run_turn_loop(session, 315))
+
+    assert resolve_call_count == 2
+    assert session.elapsed_game_minutes == 10
+    assert session.full_turn_log == [ConversationTurn(villager_id="beta", text="Beta: Done.")]
+
+
+def test_run_turn_loop_pauses_for_joiners_once_after_second_logged_turn_and_resumes() -> None:
+    """The join pause fires exactly once at log length two and the loop then continues."""
+
+    system = ConversationSystem()
+    session = _loop_session(["alpha", "beta"])
+    resolve_call_count = 0
+    pause_log_lengths: list[int] = []
+
+    async def _resolve(_session: ConversationSession, _game_time: int) -> ConversationTurnResult | None:
+        """Append three logged turns, ending after the third."""
+
+        nonlocal resolve_call_count
+        resolve_call_count += 1
+        session.full_turn_log.append(
+            ConversationTurn(villager_id="alpha", text=f"Turn {resolve_call_count}.")
+        )
+        if resolve_call_count == 3:
+            session.participant_ids = ["alpha"]
+        return ConversationTurnResult(action=ConvActionType.RESPOND, resp="spoken")
+
+    async def _pause(_session: ConversationSession, _game_time: int) -> None:
+        """Record the log length at the moment the join pause is triggered."""
+
+        pause_log_lengths.append(len(session.full_turn_log))
+
+    setattr(system, "_resolve_single_turn", _resolve)
+    setattr(system, "_pause_for_joiners", _pause)
+
+    asyncio.run(system._run_turn_loop(session, 320))
+
+    assert resolve_call_count == 3
+    assert pause_log_lengths == [2]
+    assert session.elapsed_game_minutes == 15
+
+
+def test_run_turn_loop_suspends_for_trade_then_resumes_without_trade_time_cost() -> None:
+    """A trade result triggers the subprotocol with winner-target ids and then conversation continues."""
+
+    system = ConversationSystem()
+    session = _loop_session(["initiator", "partner"])
+    resolve_call_count = 0
+    trade_calls: list[tuple[str, str, int]] = []
+
+    async def _resolve(_session: ConversationSession, _game_time: int) -> ConversationTurnResult | None:
+        """Produce a normal turn, then a trade, then one final post-trade turn."""
+
+        nonlocal resolve_call_count
+        resolve_call_count += 1
+        if resolve_call_count == 1:
+            session.full_turn_log.append(ConversationTurn(villager_id="initiator", text="First."))
+            return ConversationTurnResult(action=ConvActionType.RESPOND, resp="First.")
+        if resolve_call_count == 2:
+            session.full_turn_log.append(
+                ConversationTurn(villager_id="initiator", text="Initiator asks Partner if they want to trade.")
+            )
+            return ConversationTurnResult(
+                action=ConvActionType.TRADE,
+                target_id="partner",
+            )
+        session.full_turn_log.append(ConversationTurn(villager_id="partner", text="After trade."))
+        session.participant_ids = ["partner"]
+        return ConversationTurnResult(action=ConvActionType.RESPOND, resp="After trade.")
+
+    async def _trade(
+        _session: ConversationSession,
+        trade_initiator_id: str,
+        trade_partner_id: str,
+        game_time: int,
+    ) -> None:
+        """Record one invoked trade subprotocol call without mutating elapsed time."""
+
+        trade_calls.append((trade_initiator_id, trade_partner_id, game_time))
+
+    async def _pause(_session: ConversationSession, _game_time: int) -> None:
+        """Leave join-pause behavior inert for the trade-loop test."""
+
+        return None
+
+    setattr(system, "_resolve_single_turn", _resolve)
+    setattr(system, "_run_trade_subprotocol", _trade)
+    setattr(system, "_pause_for_joiners", _pause)
+
+    asyncio.run(system._run_turn_loop(session, 325))
+
+    assert resolve_call_count == 3
+    assert trade_calls == [("initiator", "partner", 325)]
+    assert session.elapsed_game_minutes == 15

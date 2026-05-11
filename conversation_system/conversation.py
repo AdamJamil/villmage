@@ -305,6 +305,34 @@ class ConversationSystem:
             session.all_participant_ids.append(villager_id)
             session.join_turn_index[villager_id] = join_turn_index
 
+    async def _run_turn_loop(
+        self,
+        session: ConversationSession,
+        game_time: int,
+    ) -> None:
+        """Resolve conversation turns until a roster or time end condition is met."""
+
+        has_paused_for_joiners = False
+        while True:
+            result = await self._resolve_single_turn(session, game_time)
+            session.elapsed_game_minutes += 5
+            if self._should_end_turn_loop(session):
+                return
+            if not has_paused_for_joiners and len(session.full_turn_log) == 2:
+                await self._pause_for_joiners(session, game_time)
+                has_paused_for_joiners = True
+            if result is not None and result.action is ConvActionType.TRADE:
+                trade_partner_id = result.target_id
+                if trade_partner_id is None:
+                    raise ValueError("TRADE turn result requires target_id.")
+                winner_id = session.full_turn_log[-1].villager_id
+                await self._run_trade_subprotocol(
+                    session,
+                    trade_initiator_id=winner_id,
+                    trade_partner_id=trade_partner_id,
+                    game_time=game_time,
+                )
+
     async def _get_join_decision(
         self,
         villager_id: str,
@@ -361,6 +389,12 @@ class ConversationSystem:
         if current_action.detail is not None:
             return current_action.detail
         return current_action.category.name.lower().replace("_", " ")
+
+    @staticmethod
+    def _should_end_turn_loop(session: ConversationSession) -> bool:
+        """Return whether the conversation loop must stop after the latest turn."""
+
+        return len(session.participant_ids) <= 1 or session.elapsed_game_minutes >= 60
 
     def _write_turn_to_memory(
         self,
