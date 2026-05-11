@@ -191,6 +191,11 @@ class WorldState:
         self.live_carcasses.pop(carcass_index)
         self.update_cleanliness_source(DirtinessSource.CARCASS_REMAINS, 1)
 
+    def mark_carcass_rotted(self, carcass_id: int) -> None:
+        """Apply the authored rot effect for one tracked carcass."""
+
+        self.remove_carcass(carcass_id)
+
     def _get_queued_fuel_minutes(self) -> int:
         """Return the total burn minutes represented by the queued fuel."""
 

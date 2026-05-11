@@ -39,6 +39,7 @@ from villmage.ai_coordinator.coordinator import AICoordinator
 from villmage.autobalance import AutobalanceMultipliers
 from villmage.events import (
     ActionCompleteEvent,
+    CarcassRotEvent,
     CheckpointEvent,
     FireExtinctionEvent,
     MidnightEvent,
@@ -306,20 +307,7 @@ class SimulationEngine:
             type=EventType.BASE_EVENT,
             text=f"{villager_id} died.",
         )
-        for observer_id, observer_state in self.villager_states.items():
-            current_action = observer_state.current_action
-            is_awake = (
-                current_action is None
-                or current_action.category is not ActionCategory.SLEEPING
-            )
-            is_at_base = (
-                current_action is None or not current_action.category.is_away
-            )
-            if is_awake and is_at_base:
-                self.memory_system.append_event(
-                    MemoryVillagerId(observer_id),
-                    death_event,
-                )
+        self._append_base_awake_event(death_event)
 
     def _sync_fire_event(self) -> None:
         """Reconcile the heap fire-extinction event with WorldState's fire snapshot."""
@@ -349,6 +337,35 @@ class SimulationEngine:
                 and current_action.category is ActionCategory.SLEEPING
             ):
                 action_system.adjust_active_sleep(villager_id)
+
+    def _append_base_awake_event(self, entry: EventLogEntry) -> None:
+        """Append one base event for every villager who is both present and awake."""
+
+        for villager_id, villager_state in self.villager_states.items():
+            current_action = villager_state.current_action
+            is_awake = (
+                current_action is None
+                or current_action.category is not ActionCategory.SLEEPING
+            )
+            is_at_base = (
+                current_action is None or not current_action.category.is_away
+            )
+            if is_awake and is_at_base:
+                self.memory_system.append_event(
+                    MemoryVillagerId(villager_id),
+                    entry,
+                )
+
+    def _handle_carcass_rot(self, event: CarcassRotEvent) -> None:
+        """Remove one rotted carcass and notify base awake villagers."""
+
+        self.world_state.mark_carcass_rotted(event.carcass_id)
+        rot_event = EventLogEntry(
+            game_time=self.current_game_time,
+            type=EventType.BASE_EVENT,
+            text=f"Carcass {event.carcass_id} rotted away.",
+        )
+        self._append_base_awake_event(rot_event)
 
     @staticmethod
     def _inventory_edible_calories(villager_state: VillagerState) -> int:
