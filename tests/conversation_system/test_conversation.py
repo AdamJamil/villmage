@@ -13,7 +13,7 @@ from conversation_system.conversation import ConversationSystem, format_turn_tex
 from conversation_system.types import ConversationSession
 from memory_system.types import EventLogEntry, EventType, VillagerId as MemoryVillagerId
 from villmage.game_types import ActionCategory, ItemType
-from villmage.ai_coordinator.types import ConversationTurn
+from villmage.ai_coordinator.types import ConversationSnapshot, ConversationTurn
 from villmage.ai_coordinator.types import (
     ConvActionType,
     ConversationTurnResult,
@@ -1367,3 +1367,286 @@ def test_apply_post_conversation_updates_queries_all_ordered_relationship_pairs(
         ("c", "a", "c->a", "desc:c->a"),
         ("c", "b", "c->b", "desc:c->b"),
     ]
+
+
+def test_run_conversation_initializes_session_and_returns_elapsed_minutes_with_all_participants() -> None:
+    """The public entry point builds the expected fresh session and returns loop output."""
+
+    system = ConversationSystem()
+    seen_sessions: list[ConversationSession] = []
+
+    async def _run_loop(session: ConversationSession, _game_time: int) -> None:
+        """Capture the fresh session and simulate one joiner plus elapsed time."""
+
+        seen_sessions.append(session)
+        session.elapsed_game_minutes = 15
+        session.participant_ids.append("joiner")
+        session.all_participant_ids.append("joiner")
+        session.join_turn_index["joiner"] = 0
+
+    async def _apply_updates(session: ConversationSession, _game_time: int) -> None:
+        """Capture the same session after loop completion without mutating it."""
+
+        seen_sessions.append(session)
+
+    setattr(system, "_run_turn_loop", _run_loop)
+    setattr(system, "_apply_post_conversation_updates", _apply_updates)
+
+    result = asyncio.run(system.run_conversation("initiator", "target", 600))
+
+    assert len(seen_sessions) == 2
+    session = seen_sessions[0]
+    assert seen_sessions[0] is seen_sessions[1]
+    assert session.participant_ids == ["initiator", "target", "joiner"]
+    assert session.all_participant_ids == ["initiator", "target", "joiner"]
+    assert session.join_turn_index == {
+        "initiator": 0,
+        "target": 0,
+        "joiner": 0,
+    }
+    assert session.elapsed_game_minutes == 15
+    assert session.active_trade is None
+    assert result == (15, ["initiator", "target", "joiner"])
+
+
+def test_run_conversation_integration_runs_full_loop_and_post_updates() -> None:
+    """The entry point wires turn resolution, memory writes, and aftermath updates together."""
+
+    call_log: list[str] = []
+    coordinator = Mock()
+
+    def _conversation_turn(
+        villager_id: str,
+        snapshot: ConversationSnapshot,
+        game_time: int,
+    ) -> ConversationTurnResult:
+        """Return a scripted four-turn conversation keyed by visible history length."""
+
+        history_length = len(snapshot.history)
+        call_log.append(
+            f"ai_turn:{villager_id}:{history_length}:{snapshot.elapsed_game_minutes}:{game_time}"
+        )
+        if villager_id == "initiator" and history_length == 0:
+            return ConversationTurnResult(
+                action=ConvActionType.RESPOND,
+                resp="Hello.",
+            )
+        if history_length == 1 and villager_id == "initiator":
+            return ConversationTurnResult(action=ConvActionType.SILENT)
+        if history_length == 1 and villager_id == "target":
+            return ConversationTurnResult(
+                action=ConvActionType.RESPOND,
+                resp="Hi.",
+            )
+        if history_length == 2 and snapshot.elapsed_game_minutes == 10:
+            return ConversationTurnResult(action=ConvActionType.SILENT)
+        if history_length == 2 and snapshot.elapsed_game_minutes == 15 and villager_id == "target":
+            return ConversationTurnResult(action=ConvActionType.LEAVE)
+        if (
+            history_length == 2
+            and snapshot.elapsed_game_minutes == 15
+            and villager_id == "initiator"
+        ):
+            return ConversationTurnResult(
+                action=ConvActionType.CASUAL,
+                resp="Initiator smiles.",
+            )
+        raise AssertionError(
+            f"Unexpected scripted turn for {villager_id} with history {history_length}."
+        )
+
+    def _social_score(
+        villager_id: str,
+        snapshot: ConversationSnapshot,
+        game_time: int,
+    ) -> int:
+        """Return deterministic post-conversation scores for both participants."""
+
+        call_log.append(
+            f"ai_social:{villager_id}:{len(snapshot.history)}:{snapshot.elapsed_game_minutes}:{game_time}"
+        )
+        if villager_id == "initiator":
+            return 8
+        return 3
+
+    def _relationship_update(
+        speaker_id: str,
+        subject_id: str,
+        snapshot: ConversationSnapshot,
+        game_time: int,
+    ) -> RelationshipUpdateResult:
+        """Return deterministic directional impressions for the scripted pair."""
+
+        call_log.append(
+            f"ai_rel:{speaker_id}->{subject_id}:{len(snapshot.history)}:{snapshot.elapsed_game_minutes}:{game_time}"
+        )
+        return RelationshipUpdateResult(
+            impression=f"{speaker_id}->{subject_id}",
+            desc_update=f"desc:{speaker_id}->{subject_id}",
+        )
+
+    coordinator.get_conversation_turn.side_effect = _conversation_turn
+    coordinator.get_social_score.side_effect = _social_score
+    coordinator.get_relationship_update.side_effect = _relationship_update
+    coordinator.get_join_decision.side_effect = AssertionError(
+        "No bystanders should be queried in this integration scenario."
+    )
+    coordinator.get_trade_turn.side_effect = AssertionError(
+        "Trade should not be entered in this integration scenario."
+    )
+
+    class _TracingMemoryRecorder(_MemoryRecorder):
+        """Memory recorder variant that also captures the call order."""
+
+        def append_event(self, villager_id: MemoryVillagerId, entry: EventLogEntry) -> None:
+            """Record one conversation or trade event with ordering information."""
+
+            call_log.append(f"memory_event:{villager_id}:{entry.type.name}:{entry.text}")
+            super().append_event(villager_id, entry)
+
+        def write_impressions(
+            self,
+            speaker_id: str,
+            subject_id: str,
+            impression: str,
+            desc_update: str | None,
+        ) -> None:
+            """Record one relationship write with ordering information."""
+
+            call_log.append(
+                f"memory_impression:{speaker_id}->{subject_id}:{impression}:{desc_update}"
+            )
+            super().write_impressions(speaker_id, subject_id, impression, desc_update)
+
+    memory = _TracingMemoryRecorder()
+    initiator_state = _villager_state("initiator")
+    target_state = _villager_state("target")
+    initiator_state.social_joy = 40.0
+    initiator_state.connectedness = 30.0
+    target_state.social_joy = 50.0
+    target_state.connectedness = 25.0
+
+    initiator_modify_stat = initiator_state.modify_stat
+    target_modify_stat = target_state.modify_stat
+
+    def _trace_initiator_modify_stat(stat: object, delta: float) -> None:
+        """Wrap initiator stat mutation so the integration call order is observable."""
+
+        call_log.append(f"state:initiator:{stat}:{delta}")
+        initiator_modify_stat(stat, delta)
+
+    def _trace_target_modify_stat(stat: object, delta: float) -> None:
+        """Wrap target stat mutation so the integration call order is observable."""
+
+        call_log.append(f"state:target:{stat}:{delta}")
+        target_modify_stat(stat, delta)
+
+    initiator_state.modify_stat = Mock(side_effect=_trace_initiator_modify_stat)
+    target_state.modify_stat = Mock(side_effect=_trace_target_modify_stat)
+
+    system = ConversationSystem(
+        ai_coordinator=coordinator,
+        memory_system=memory,
+        canon=_CanonStub({"initiator": "Initiator", "target": "Target"}),
+        villager_states={
+            "initiator": initiator_state,
+            "target": target_state,
+        },
+    )
+
+    result = asyncio.run(system.run_conversation("initiator", "target", 500))
+
+    assert result == (20, ["initiator", "target"])
+    assert [entry.text for entry in memory.events_by_villager["initiator"]] == [
+        "Initiator: Hello.",
+        "Target: Hi.",
+        "Target leaves the conversation.",
+        "Initiator smiles.",
+    ]
+    assert [entry.text for entry in memory.events_by_villager["target"]] == [
+        "Initiator: Hello.",
+        "Target: Hi.",
+        "Target leaves the conversation.",
+    ]
+    assert initiator_state.social_joy == 43.0
+    assert initiator_state.connectedness == 50.0
+    assert target_state.social_joy == 48.0
+    assert target_state.connectedness == 45.0
+    assert memory.impression_writes == [
+        ("initiator", "target", "initiator->target", "desc:initiator->target"),
+        ("target", "initiator", "target->initiator", "desc:target->initiator"),
+    ]
+    assert call_log == [
+        "ai_turn:initiator:0:0:500",
+        "memory_event:initiator:CONVO_TURN:Initiator: Hello.",
+        "memory_event:target:CONVO_TURN:Initiator: Hello.",
+        "ai_turn:initiator:1:5:500",
+        "ai_turn:target:1:5:500",
+        "memory_event:initiator:CONVO_TURN:Target: Hi.",
+        "memory_event:target:CONVO_TURN:Target: Hi.",
+        "ai_turn:initiator:2:10:500",
+        "ai_turn:target:2:10:500",
+        "ai_turn:initiator:2:15:500",
+        "ai_turn:target:2:15:500",
+        "memory_event:initiator:CONVO_TURN:Target leaves the conversation.",
+        "memory_event:target:CONVO_TURN:Target leaves the conversation.",
+        "memory_event:initiator:CONVO_TURN:Initiator smiles.",
+        "ai_social:initiator:4:20:500",
+        "ai_social:target:4:20:500",
+        "ai_rel:initiator->target:4:20:500",
+        "ai_rel:target->initiator:4:20:500",
+        "state:initiator:social_joy:3.0",
+        "state:initiator:connectedness:20.0",
+        "memory_impression:initiator->target:initiator->target:desc:initiator->target",
+        "state:target:social_joy:-2.0",
+        "state:target:connectedness:20.0",
+        "memory_impression:target->initiator:target->initiator:desc:target->initiator",
+    ]
+
+
+def test_run_conversation_is_stateless_between_calls() -> None:
+    """Each public call allocates an independent session with no leaked mutable state."""
+
+    system = ConversationSystem()
+    seen_sessions: list[ConversationSession] = []
+
+    async def _run_loop(session: ConversationSession, _game_time: int) -> None:
+        """Mutate each session differently so reuse would be visible."""
+
+        seen_sessions.append(session)
+        if session.participant_ids[0] == "alpha":
+            session.elapsed_game_minutes = 5
+            session.all_participant_ids.append("joiner-a")
+            session.join_turn_index["joiner-a"] = 0
+            return
+        session.elapsed_game_minutes = 10
+        session.all_participant_ids.append("joiner-b")
+        session.join_turn_index["joiner-b"] = 0
+
+    async def _apply_updates(_session: ConversationSession, _game_time: int) -> None:
+        """Leave post-conversation behavior inert for the statelessness test."""
+
+        return None
+
+    setattr(system, "_run_turn_loop", _run_loop)
+    setattr(system, "_apply_post_conversation_updates", _apply_updates)
+
+    first_result = asyncio.run(system.run_conversation("alpha", "beta", 700))
+    second_result = asyncio.run(system.run_conversation("gamma", "delta", 705))
+
+    assert first_result == (5, ["alpha", "beta", "joiner-a"])
+    assert second_result == (10, ["gamma", "delta", "joiner-b"])
+    assert len(seen_sessions) == 2
+    assert seen_sessions[0] is not seen_sessions[1]
+    assert seen_sessions[0].participant_ids == ["alpha", "beta"]
+    assert seen_sessions[1].participant_ids == ["gamma", "delta"]
+    assert seen_sessions[0].join_turn_index == {
+        "alpha": 0,
+        "beta": 0,
+        "joiner-a": 0,
+    }
+    assert seen_sessions[1].join_turn_index == {
+        "gamma": 0,
+        "delta": 0,
+        "joiner-b": 0,
+    }

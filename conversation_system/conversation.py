@@ -169,6 +169,26 @@ class ConversationSystem:
         self._canon = canon
         self._villager_states = villager_states
 
+    async def run_conversation(
+        self,
+        initiator_id: str,
+        target_id: str,
+        game_time: int,
+    ) -> tuple[int, list[str]]:
+        """Run one full conversation session and return elapsed minutes plus participants."""
+
+        session = ConversationSession(
+            participant_ids=[initiator_id, target_id],
+            all_participant_ids=[initiator_id, target_id],
+            full_turn_log=[],
+            join_turn_index={initiator_id: 0, target_id: 0},
+            elapsed_game_minutes=0,
+            last_spoke_turn={},
+        )
+        await self._run_turn_loop(session, game_time)
+        await self._apply_post_conversation_updates(session, game_time)
+        return (session.elapsed_game_minutes, session.all_participant_ids)
+
     def _select_winner(
         self,
         responses: dict[str, ConversationTurnResult],
