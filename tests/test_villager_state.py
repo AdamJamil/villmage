@@ -13,6 +13,7 @@ from villmage.game_types import (
     WorldContext,
 )
 from villmage.villager_state import (
+    ComputedStats,
     CraftingProgress,
     CurrentAction,
     HealthSubcomponent,
@@ -559,6 +560,43 @@ def _world_context(
     )
 
 
+def _computed_stats(
+    *,
+    well_being: float = 1.0,
+    mood: float = 1.0,
+    health: float = 1.0,
+    safety: float = 1.0,
+    wakefulness_pct: float = 1.0,
+    satiation_pct: float = 1.0,
+    hydration_pct: float = 1.0,
+    social_joy_pct: float = 1.0,
+    connectedness_pct: float = 1.0,
+    cleanliness_pct: float = 1.0,
+    base_cleanliness: float = 1.0,
+    rest_hours_since: float = 0.0,
+    dominant_mood_input: MoodSubcomponent = MoodSubcomponent.SOCIAL_JOY,
+    dominant_health_input: HealthSubcomponent = HealthSubcomponent.WAKEFULNESS,
+) -> ComputedStats:
+    """Build a fully-populated ComputedStats fixture with override-friendly defaults."""
+
+    return ComputedStats(
+        well_being=well_being,
+        mood=mood,
+        health=health,
+        safety=safety,
+        wakefulness_pct=wakefulness_pct,
+        satiation_pct=satiation_pct,
+        hydration_pct=hydration_pct,
+        social_joy_pct=social_joy_pct,
+        connectedness_pct=connectedness_pct,
+        cleanliness_pct=cleanliness_pct,
+        base_cleanliness=base_cleanliness,
+        rest_hours_since=rest_hours_since,
+        dominant_mood_input=dominant_mood_input,
+        dominant_health_input=dominant_health_input,
+    )
+
+
 def test_compute_stats_component_percentages_and_base_cleanliness() -> None:
     """Component percentages and base cleanliness follow the authored scales."""
 
@@ -841,3 +879,383 @@ def test_compute_stats_populates_dominant_input_fields() -> None:
 
     assert isinstance(computed.dominant_mood_input, MoodSubcomponent)
     assert isinstance(computed.dominant_health_input, HealthSubcomponent)
+
+
+def test_get_stat_descriptions_always_includes_primary_aggregate_keys() -> None:
+    """The four aggregate prompt descriptions are always present."""
+
+    villager_state = VillagerState("aldric")
+
+    descriptions = villager_state.get_stat_descriptions(_computed_stats())
+
+    assert "well_being" in descriptions
+    assert "mood" in descriptions
+    assert "health" in descriptions
+    assert "safety" in descriptions
+
+
+def test_get_stat_descriptions_always_includes_dominant_subcomponents() -> None:
+    """Dominant mood and health inputs are surfaced even without threshold-triggered inclusion."""
+
+    villager_state = VillagerState("aldric")
+
+    descriptions = villager_state.get_stat_descriptions(
+        _computed_stats(
+            satiation_pct=0.95,
+            dominant_mood_input=MoodSubcomponent.CONNECTEDNESS,
+            dominant_health_input=HealthSubcomponent.SATIATION,
+        )
+    )
+
+    assert "connectedness" in descriptions
+    assert "satiation" in descriptions
+
+
+@pytest.mark.parametrize(
+    ("satiation_pct", "is_dominant", "should_include"),
+    [
+        (0.89, False, True),
+        (0.90, False, False),
+        (0.90, True, True),
+    ],
+)
+def test_get_stat_descriptions_conditionally_includes_satiation(
+    satiation_pct: float,
+    is_dominant: bool,
+    should_include: bool,
+) -> None:
+    """Satiation prompt inclusion follows the authored boundary and dominant override."""
+
+    villager_state = VillagerState("aldric")
+    dominant_health_input = (
+        HealthSubcomponent.SATIATION
+        if is_dominant
+        else HealthSubcomponent.WAKEFULNESS
+    )
+
+    descriptions = villager_state.get_stat_descriptions(
+        _computed_stats(
+            satiation_pct=satiation_pct,
+            dominant_health_input=dominant_health_input,
+        )
+    )
+
+    assert ("satiation" in descriptions) is should_include
+
+
+@pytest.mark.parametrize(
+    ("hydration_pct", "is_dominant", "should_include"),
+    [
+        (0.49, False, True),
+        (0.50, False, False),
+        (0.50, True, True),
+    ],
+)
+def test_get_stat_descriptions_conditionally_includes_hydration(
+    hydration_pct: float,
+    is_dominant: bool,
+    should_include: bool,
+) -> None:
+    """Hydration prompt inclusion follows the authored boundary and dominant override."""
+
+    villager_state = VillagerState("aldric")
+    dominant_health_input = (
+        HealthSubcomponent.HYDRATION
+        if is_dominant
+        else HealthSubcomponent.WAKEFULNESS
+    )
+
+    descriptions = villager_state.get_stat_descriptions(
+        _computed_stats(
+            hydration_pct=hydration_pct,
+            dominant_health_input=dominant_health_input,
+        )
+    )
+
+    assert ("hydration" in descriptions) is should_include
+
+
+@pytest.mark.parametrize(
+    ("wakefulness_pct", "is_dominant", "should_include"),
+    [
+        (0.49, False, True),
+        (0.50, False, False),
+        (0.50, True, True),
+    ],
+)
+def test_get_stat_descriptions_conditionally_includes_wakefulness(
+    wakefulness_pct: float,
+    is_dominant: bool,
+    should_include: bool,
+) -> None:
+    """Wakefulness prompt inclusion follows the authored boundary and dominant override."""
+
+    villager_state = VillagerState("aldric")
+    dominant_health_input = (
+        HealthSubcomponent.WAKEFULNESS
+        if is_dominant
+        else HealthSubcomponent.HYDRATION
+    )
+
+    descriptions = villager_state.get_stat_descriptions(
+        _computed_stats(
+            wakefulness_pct=wakefulness_pct,
+            dominant_health_input=dominant_health_input,
+        )
+    )
+
+    assert ("wakefulness" in descriptions) is should_include
+
+
+def test_get_stat_descriptions_deduplicates_overlapping_inclusion_paths() -> None:
+    """A stat selected by dominant and conditional inclusion still appears once."""
+
+    villager_state = VillagerState("aldric")
+
+    descriptions = villager_state.get_stat_descriptions(
+        _computed_stats(
+            satiation_pct=0.80,
+            dominant_health_input=HealthSubcomponent.SATIATION,
+        )
+    )
+
+    assert list(descriptions).count("satiation") == 1
+    assert (
+        descriptions["satiation"]
+        == "You're starving. It's hard to think about anything else."
+    )
+
+
+@pytest.mark.parametrize(
+    ("well_being", "expected"),
+    [
+        (0.05, "You feel deathly terrible. Something is horribly wrong."),
+        (0.20, "Life feels rough. You're struggling."),
+        (0.40, "Things are okay. Could be better, could be worse."),
+        (0.67, "You feel pretty good about how things are going."),
+        (0.90, "Life is good. Really, truly good."),
+    ],
+)
+def test_get_stat_descriptions_well_being_uses_authored_boundaries(
+    well_being: float,
+    expected: str,
+) -> None:
+    """Well-being boundaries resolve to the authored five-tier prompt text."""
+
+    villager_state = VillagerState("aldric")
+
+    descriptions = villager_state.get_stat_descriptions(
+        _computed_stats(well_being=well_being)
+    )
+
+    assert descriptions["well_being"] == expected
+
+
+@pytest.mark.parametrize(
+    ("computed", "key", "expected_bottom", "expected_top"),
+    [
+        (
+            _computed_stats(well_being=0.05),
+            "well_being",
+            "You feel deathly terrible. Something is horribly wrong.",
+            "Life is good. Really, truly good.",
+        ),
+        (
+            _computed_stats(mood=0.05),
+            "mood",
+            "You feel truly miserable. Every waking moment is hell.",
+            "You're in wonderful spirits.",
+        ),
+        (
+            _computed_stats(health=0.05),
+            "health",
+            "You are on the brink of death. You need help immediately.",
+            "You feel strong and full of energy.",
+        ),
+        (
+            _computed_stats(safety=0.05),
+            "safety",
+            "There is almost nothing left. Starvation or freezing feels inevitable.",
+            "You feel secure. There's plenty of food and fuel to last.",
+        ),
+        (
+            _computed_stats(
+                social_joy_pct=0.05,
+                dominant_mood_input=MoodSubcomponent.SOCIAL_JOY,
+            ),
+            "social_joy",
+            "You are completely alone. Nobody cares, and you know it.",
+            "You feel loved. The people around you make life worth living.",
+        ),
+        (
+            _computed_stats(
+                connectedness_pct=0.05,
+                dominant_mood_input=MoodSubcomponent.CONNECTEDNESS,
+            ),
+            "connectedness",
+            "You are a ghost. You could vanish and no one would notice.",
+            "You feel connected to the people in your life.",
+        ),
+        (
+            _computed_stats(
+                cleanliness_pct=0.05,
+                dominant_mood_input=MoodSubcomponent.CLEANLINESS,
+            ),
+            "cleanliness",
+            "You are caked in filth. Your stench spreads miles away.",
+            "You are clean",
+        ),
+        (
+            _computed_stats(
+                base_cleanliness=0.05,
+                dominant_mood_input=MoodSubcomponent.BASE_CLEANLINESS,
+            ),
+            "base_cleanliness",
+            "The base is filthy.",
+            "The base could be cleaner.",
+        ),
+        (
+            _computed_stats(
+                wakefulness_pct=0.05,
+                dominant_health_input=HealthSubcomponent.WAKEFULNESS,
+            ),
+            "wakefulness",
+            "You are on the brink of collapse. The world is fading in and out.",
+            "You're wide awake and sharp. The world is vivid.",
+        ),
+        (
+            _computed_stats(
+                satiation_pct=0.05,
+                dominant_health_input=HealthSubcomponent.SATIATION,
+            ),
+            "satiation",
+            "You can barely move. You are starving to death.",
+            "You're perfectly full.",
+        ),
+        (
+            _computed_stats(
+                hydration_pct=0.05,
+                dominant_health_input=HealthSubcomponent.HYDRATION,
+            ),
+            "hydration",
+            "You can barely swallow. Your body is shutting down.",
+            "You feel well hydrated.",
+        ),
+        (
+            _computed_stats(
+                rest_hours_since=4.9,
+                dominant_mood_input=MoodSubcomponent.REST,
+            ),
+            "rest",
+            "You've been going nonstop without a break. You're wound tight.",
+            "You've had time to yourself recently. Your head feels clear.",
+        ),
+    ],
+)
+def test_get_stat_descriptions_all_tables_cover_bottom_and_top_tiers(
+    computed: ComputedStats,
+    key: str,
+    expected_bottom: str,
+    expected_top: str,
+) -> None:
+    """Each authored description table resolves correctly in both extremes."""
+
+    villager_state = VillagerState("aldric")
+
+    bottom_descriptions = villager_state.get_stat_descriptions(computed)
+    top_descriptions = villager_state.get_stat_descriptions(
+        _computed_stats(
+            dominant_mood_input=computed.dominant_mood_input,
+            dominant_health_input=computed.dominant_health_input,
+        )
+    )
+
+    assert bottom_descriptions[key] == expected_bottom
+    assert top_descriptions[key] == expected_top
+
+
+@pytest.mark.parametrize(
+    ("rest_hours_since", "expected"),
+    [
+        (
+            0.0,
+            "You've had time to yourself recently. Your head feels clear.",
+        ),
+        (
+            3.0,
+            "It's been a while since you've had a moment to just sit and breathe.",
+        ),
+        (
+            4.5,
+            "You've been going nonstop without a break. You're wound tight.",
+        ),
+    ],
+)
+def test_get_stat_descriptions_rest_uses_remaining_benefit_percent(
+    rest_hours_since: float,
+    expected: str,
+) -> None:
+    """REST prompt text is chosen from remaining-rest-benefit percentage tiers."""
+
+    villager_state = VillagerState("aldric")
+
+    descriptions = villager_state.get_stat_descriptions(
+        _computed_stats(
+            rest_hours_since=rest_hours_since,
+            dominant_mood_input=MoodSubcomponent.REST,
+        )
+    )
+
+    assert descriptions["rest"] == expected
+
+
+def test_get_stat_descriptions_returns_only_non_empty_strings() -> None:
+    """All surfaced prompt descriptions are non-empty strings."""
+
+    villager_state = VillagerState("aldric")
+
+    descriptions = villager_state.get_stat_descriptions(
+        _computed_stats(
+            wakefulness_pct=0.40,
+            satiation_pct=0.80,
+            hydration_pct=0.40,
+            dominant_mood_input=MoodSubcomponent.REST,
+            dominant_health_input=HealthSubcomponent.SATIATION,
+            rest_hours_since=3.0,
+        )
+    )
+
+    assert descriptions
+    assert all(isinstance(value, str) and value for value in descriptions.values())
+
+
+@pytest.mark.parametrize(
+    ("health", "expected"),
+    [
+        (0.5, 1.0),
+        (1.0, 1.0),
+        (0.51, 1.0),
+        (0.4, 0.8),
+        (0.0, 0.0),
+        (0.25, 0.5),
+    ],
+)
+def test_get_work_speed_modifier_follows_authored_health_formula(
+    health: float,
+    expected: float,
+) -> None:
+    """Work-speed modifier follows BHVR-189 exactly above and below the threshold."""
+
+    villager_state = VillagerState("aldric")
+
+    modifier = villager_state.get_work_speed_modifier(_computed_stats(health=health))
+
+    assert modifier == expected
+
+
+def test_get_work_speed_modifier_returns_one_at_exact_boundary() -> None:
+    """The health threshold includes the exact 0.5 boundary."""
+
+    villager_state = VillagerState("aldric")
+
+    assert villager_state.get_work_speed_modifier(_computed_stats(health=0.5)) == 1.0

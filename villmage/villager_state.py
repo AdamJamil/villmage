@@ -74,8 +74,122 @@ class ComputedStats:
     connectedness_pct: float
     cleanliness_pct: float
     base_cleanliness: float
+    rest_hours_since: float
     dominant_mood_input: MoodSubcomponent
     dominant_health_input: HealthSubcomponent
+
+
+DescriptionTiers = tuple[tuple[float, str], ...]
+
+
+_WELL_BEING_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "You feel deathly terrible. Something is horribly wrong."),
+    (10.0, "Life feels rough. You're struggling."),
+    (30.0, "Things are okay. Could be better, could be worse."),
+    (50.0, "You feel pretty good about how things are going."),
+    (85.0, "Life is good. Really, truly good."),
+)
+_MOOD_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "You feel truly miserable. Every waking moment is hell."),
+    (10.0, "You're in a foul mood. Irritable, drained, and withdrawn."),
+    (30.0, "You feel a bit flat. Not miserable, but not great either."),
+    (50.0, "You're in a decent mood. Nothing to complain about."),
+    (85.0, "You're in wonderful spirits."),
+)
+_HEALTH_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "You are on the brink of death. You need help immediately."),
+    (10.0, "Your body is failing you. Everything aches and nothing feels right."),
+    (30.0, "You feel a little run down. Your work speed is reduced."),
+    (50.0, "You're in good physical shape."),
+    (85.0, "You feel strong and full of energy."),
+)
+_SAFETY_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "There is almost nothing left. Starvation or freezing feels inevitable."),
+    (10.0, "Stores are nearly gone. You dread what happens when they run out."),
+    (30.0, "Supplies are getting thin. You're starting to worry about what's ahead."),
+    (50.0, "You're not worried. Supplies seem adequate for now."),
+    (85.0, "You feel secure. There's plenty of food and fuel to last."),
+)
+_SOCIAL_JOY_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "You are completely alone. Nobody cares, and you know it."),
+    (10.0, "You feel disconnected from everyone around you. Conversations feel hollow."),
+    (30.0, "Your social life is whatever. You're not lonely, but not fulfilled either."),
+    (50.0, "You've got good company. Things feel warm and easy."),
+    (85.0, "You feel loved. The people around you make life worth living."),
+)
+_CONNECTEDNESS_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "You are a ghost. You could vanish and no one would notice."),
+    (10.0, "You feel like a stranger to everyone. Nobody really knows you."),
+    (30.0, "You know people, but it all feels surface level."),
+    (50.0, "You feel like you belong. The party knows you well."),
+    (85.0, "You feel connected to the people in your life."),
+)
+_CLEANLINESS_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "You are caked in filth. Your stench spreads miles away."),
+    (20.0, "You stink and feel gross."),
+    (40.0, "You smell a little and could use a wash."),
+    (60.0, "You are clean"),
+)
+_BASE_CLEANLINESS_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "The base is filthy."),
+    (20.0, "The base could be cleaner."),
+)
+_WAKEFULNESS_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "You are on the brink of collapse. The world is fading in and out."),
+    (10.0, "You can barely keep your eyes open. Your thoughts are soup."),
+    (30.0, "You're sleepy. Everything takes a little more effort than it should."),
+    (50.0, "You're alert enough. No fog, no complaints."),
+    (85.0, "You're wide awake and sharp. The world is vivid."),
+)
+_SATIATION_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "You can barely move. You are starving to death."),
+    (10.0, "Your body is eating itself. You need food now."),
+    (76.0, "You're starving. It's hard to think about anything else."),
+    (90.0, "You could eat. Your stomach is starting to rumble."),
+    (96.0, "You're perfectly full."),
+)
+_HYDRATION_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "You can barely swallow. Your body is shutting down."),
+    (10.0, "You're parched. Your head is pounding and your lips are cracking."),
+    (30.0, "Your mouth is dry. You need water soon."),
+    (50.0, "You're fine. Not thirsty, not thinking about it."),
+    (85.0, "You feel well hydrated."),
+)
+_REST_DESCRIPTION_TIERS: DescriptionTiers = (
+    (0.0, "You've been going nonstop without a break. You're wound tight."),
+    (
+        33.0,
+        "It's been a while since you've had a moment to just sit and breathe.",
+    ),
+    (67.0, "You've had time to yourself recently. Your head feels clear."),
+)
+
+_DESCRIPTION_SPECS: dict[str, tuple[DescriptionTiers, float]] = {
+    "well_being": (_WELL_BEING_DESCRIPTION_TIERS, 100.0),
+    "mood": (_MOOD_DESCRIPTION_TIERS, 100.0),
+    "health": (_HEALTH_DESCRIPTION_TIERS, 100.0),
+    "safety": (_SAFETY_DESCRIPTION_TIERS, 100.0),
+    "social_joy": (_SOCIAL_JOY_DESCRIPTION_TIERS, 100.0),
+    "connectedness": (_CONNECTEDNESS_DESCRIPTION_TIERS, 100.0),
+    "cleanliness": (_CLEANLINESS_DESCRIPTION_TIERS, 100.0),
+    "base_cleanliness": (_BASE_CLEANLINESS_DESCRIPTION_TIERS, 100.0),
+    "wakefulness": (_WAKEFULNESS_DESCRIPTION_TIERS, 100.0),
+    "satiation": (_SATIATION_DESCRIPTION_TIERS, 100.0),
+    "hydration": (_HYDRATION_DESCRIPTION_TIERS, 100.0),
+    "rest": (_REST_DESCRIPTION_TIERS, 1.0),
+}
+_MOOD_DESCRIPTION_KEYS: dict[MoodSubcomponent, str] = {
+    MoodSubcomponent.SOCIAL_JOY: "social_joy",
+    MoodSubcomponent.CONNECTEDNESS: "connectedness",
+    MoodSubcomponent.CLEANLINESS: "cleanliness",
+    MoodSubcomponent.BASE_CLEANLINESS: "base_cleanliness",
+    MoodSubcomponent.REST: "rest",
+}
+_HEALTH_DESCRIPTION_KEYS: dict[HealthSubcomponent, str] = {
+    HealthSubcomponent.WAKEFULNESS: "wakefulness",
+    HealthSubcomponent.SATIATION: "satiation",
+    HealthSubcomponent.HYDRATION: "hydration",
+}
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -114,6 +228,28 @@ def _compute_mood_value(
     ) ** (1.0 / 22.0)
     rest_term = (0.3 / 5.0) * max(0.0, 5.0 - rest_hours_since)
     return min(1.0, (0.5 * linear_term) + (0.5 * geometric_term) + rest_term)
+
+
+def _get_description_tier(value: float, tiers: DescriptionTiers) -> str:
+    """Return the authored description for one thresholded stat value."""
+
+    for lower_bound, text in reversed(tiers):
+        if value >= lower_bound:
+            return text
+    raise ValueError(f"No description tier matched value {value}.")
+
+
+def _rest_description_value(rest_hours_since: float) -> float:
+    """Convert hours since rest into remaining-rest-benefit percentage."""
+
+    return (max(0.0, 5.0 - rest_hours_since) / 5.0) * 100.0
+
+
+def _description_text(stat_name: str, stat_value: float) -> str:
+    """Resolve one stat name and normalized value to its authored prompt text."""
+
+    tiers, scale = _DESCRIPTION_SPECS[stat_name]
+    return _get_description_tier(stat_value * scale, tiers)
 
 
 class VillagerState:
@@ -286,6 +422,7 @@ class VillagerState:
             connectedness_pct=connectedness_pct,
             cleanliness_pct=cleanliness_pct,
             base_cleanliness=base_cleanliness,
+            rest_hours_since=rest_hours_since,
             dominant_mood_input=self._dominant_mood_input(
                 social_joy_pct,
                 connectedness_pct,
@@ -299,6 +436,42 @@ class VillagerState:
                 hydration_pct,
             ),
         )
+
+    def get_stat_descriptions(self, computed: ComputedStats) -> dict[str, str]:
+        """Return authored prompt-ready stat descriptions keyed by stat name."""
+
+        stat_values: dict[str, float] = {
+            "well_being": computed.well_being,
+            "mood": computed.mood,
+            "health": computed.health,
+            "safety": computed.safety,
+            "social_joy": computed.social_joy_pct,
+            "connectedness": computed.connectedness_pct,
+            "cleanliness": computed.cleanliness_pct,
+            "base_cleanliness": computed.base_cleanliness,
+            "wakefulness": computed.wakefulness_pct,
+            "satiation": computed.satiation_pct,
+            "hydration": computed.hydration_pct,
+            "rest": _rest_description_value(computed.rest_hours_since),
+        }
+        always_included_keys = ("well_being", "mood", "health", "safety")
+        included_keys = (
+            list(always_included_keys)
+            + [_MOOD_DESCRIPTION_KEYS[computed.dominant_mood_input]]
+            + [_HEALTH_DESCRIPTION_KEYS[computed.dominant_health_input]]
+            + (["satiation"] * (computed.satiation_pct < 0.90))
+            + (["hydration"] * (computed.hydration_pct < 0.50))
+            + (["wakefulness"] * (computed.wakefulness_pct < 0.50))
+        )
+        return {
+            key: _description_text(key, stat_values[key])
+            for key in included_keys
+        }
+
+    def get_work_speed_modifier(self, computed: ComputedStats) -> float:
+        """Return the authored health-based work-speed multiplier."""
+
+        return 1.0 if computed.health >= 0.5 else computed.health * 2.0
 
     def _dominant_mood_input(
         self,
