@@ -2,10 +2,13 @@
 
 """Tests for world-state foundation types and starting invariants."""
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from villmage.game_types import ItemType, RestingSpotType
 from villmage.world_state import (
+    BaseSummary,
     Carcass,
     DIRTINESS_PENALTY,
     FUEL_BURN_DURATION_MINUTES,
@@ -617,3 +620,143 @@ def test_remove_carcass_accumulates_dirtiness_and_caps_at_one_hundred() -> None:
     world_state.remove_carcass(fourth_id)
 
     assert world_state.get_total_dirtiness() == 100
+
+
+def test_get_total_edible_calories_returns_zero_for_empty_storage() -> None:
+    """Empty base storage contains no edible calories."""
+
+    world_state = WorldState()
+
+    assert world_state.get_total_edible_calories() == 0
+
+
+def test_get_total_edible_calories_counts_peaches() -> None:
+    """Peaches contribute sixty calories each."""
+
+    world_state = WorldState()
+    world_state.modify_base_item(ItemType.PEACH, 5)
+
+    assert world_state.get_total_edible_calories() == 300
+
+
+def test_get_total_edible_calories_counts_cooked_meat() -> None:
+    """Cooked meat contributes eight hundred calories each."""
+
+    world_state = WorldState()
+    world_state.modify_base_item(ItemType.COOKED_MEAT, 3)
+
+    assert world_state.get_total_edible_calories() == 2_400
+
+
+def test_get_total_edible_calories_adds_supported_foods() -> None:
+    """Peaches and cooked meat sum into one edible-calorie total."""
+
+    world_state = WorldState()
+    world_state.modify_base_item(ItemType.PEACH, 5)
+    world_state.modify_base_item(ItemType.COOKED_MEAT, 3)
+
+    assert world_state.get_total_edible_calories() == 2_700
+
+
+def test_get_total_edible_calories_ignores_non_edible_items() -> None:
+    """Items outside the edible set contribute no calories."""
+
+    world_state = WorldState()
+    world_state.modify_base_item(ItemType.RAW_MEAT, 4)
+    world_state.modify_base_item(ItemType.LOG, 2)
+    world_state.modify_base_item(ItemType.FIREWOOD, 3)
+
+    assert world_state.get_total_edible_calories() == 0
+
+
+def test_get_total_fuel_minutes_returns_zero_for_empty_state() -> None:
+    """No stored fuel and no queued fire fuel yields zero minutes."""
+
+    world_state = WorldState()
+
+    assert world_state.get_total_fuel_minutes(current_time=0) == 0
+
+
+def test_get_total_fuel_minutes_counts_base_storage_fuel() -> None:
+    """Stored firewood and sticks contribute their authored burn minutes."""
+
+    world_state = WorldState()
+    world_state.modify_base_item(ItemType.FIREWOOD, 3)
+    world_state.modify_base_item(ItemType.STICK, 10)
+
+    assert world_state.get_total_fuel_minutes(current_time=0) == 70
+
+
+def test_get_total_fuel_minutes_counts_unlit_fire_queue() -> None:
+    """Queued but unlit fuel contributes its full burn duration."""
+
+    world_state = WorldState()
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 4, current_time=0)
+
+    assert world_state.get_total_fuel_minutes(current_time=0) == 80
+
+
+def test_get_total_fuel_minutes_counts_lit_fire_queue_by_remaining_time() -> None:
+    """Lit fire fuel contributes only the live remaining burn time."""
+
+    world_state = WorldState()
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 4, current_time=0)
+    world_state.light_fire(current_time=0)
+
+    assert world_state.get_total_fuel_minutes(current_time=20) == 60
+
+
+def test_get_total_fuel_minutes_adds_storage_and_fire_without_double_counting() -> None:
+    """Stored fuel and queued fire fuel accumulate into one total."""
+
+    world_state = WorldState()
+    world_state.modify_base_item(ItemType.FIREWOOD, 5)
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 2, current_time=0)
+    world_state.light_fire(current_time=0)
+
+    assert world_state.get_total_fuel_minutes(current_time=0) == 140
+
+
+def test_get_base_summary_returns_consistent_snapshot() -> None:
+    """BaseSummary reflects the full live base state at the call time."""
+
+    world_state = WorldState()
+    world_state.modify_base_item(ItemType.PEACH, 10)
+    world_state.modify_base_item(ItemType.COOKED_MEAT, 2)
+    world_state.modify_water(1_000)
+    world_state.add_fire_fuel(FuelType.FIREWOOD, 1, current_time=0)
+    world_state.add_fire_fuel(FuelType.STICK, 10, current_time=0)
+    world_state.light_fire(current_time=0)
+    world_state.update_cleanliness_source(DirtinessSource.CARCASS_REMAINS, 2)
+    world_state.add_carcass(arrival_timestamp=5)
+    world_state.place_resting_spot("aldric", RestingSpotType.BED_ROLL)
+
+    assert world_state.get_base_summary(current_time=0) == BaseSummary(
+        storage={
+            ItemType.PEACH: 10,
+            ItemType.COOKED_MEAT: 2,
+        },
+        water_supply_ml=1_000,
+        fire_lit=True,
+        remaining_fuel_minutes=30,
+        total_dirtiness=60,
+        live_carcass_count=1,
+        placed_resting_spots={"aldric": RestingSpotType.BED_ROLL},
+    )
+
+
+def test_base_summary_is_frozen() -> None:
+    """BaseSummary rejects field reassignment after construction."""
+
+    summary = BaseSummary(
+        storage={},
+        water_supply_ml=0,
+        fire_lit=False,
+        remaining_fuel_minutes=0,
+        total_dirtiness=0,
+        live_carcass_count=0,
+        placed_resting_spots={},
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        summary.water_supply_ml = 1

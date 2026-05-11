@@ -1,6 +1,6 @@
 # pyre-strict
 
-"""Shared mutable world state and its internal typed records."""
+"""Shared mutable world state and its aggregate read snapshots."""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -59,6 +59,19 @@ class Fire:
     lit: bool
     fuel_queue: tuple[FuelUnit, ...]
     extinction_timestamp: int | None
+
+
+@dataclass(frozen=True)
+class BaseSummary:
+    """Frozen snapshot of the full base state at one point in time."""
+
+    storage: dict[ItemType, int]
+    water_supply_ml: int
+    fire_lit: bool
+    remaining_fuel_minutes: int
+    total_dirtiness: int
+    live_carcass_count: int
+    placed_resting_spots: dict[str, RestingSpotType]
 
 
 def item_type_to_fuel_type(item: ItemType) -> FuelType:
@@ -278,6 +291,43 @@ class WorldState:
             for source in DirtinessSource
         )
         return min(100, total_dirtiness)
+
+    def get_total_edible_calories(self) -> int:
+        """Return total edible calories currently stored in the base."""
+
+        peach_calories = self.get_base_item_count(ItemType.PEACH) * 60
+        cooked_meat_calories = self.get_base_item_count(ItemType.COOKED_MEAT) * 800
+        return peach_calories + cooked_meat_calories
+
+    def get_total_fuel_minutes(self, current_time: int) -> int:
+        """Return all combustible fuel minutes across storage and the fire."""
+
+        stored_firewood_minutes = (
+            self.get_base_item_count(ItemType.FIREWOOD)
+            * FUEL_BURN_DURATION_MINUTES[FuelType.FIREWOOD]
+        )
+        stored_stick_minutes = (
+            self.get_base_item_count(ItemType.STICK)
+            * FUEL_BURN_DURATION_MINUTES[FuelType.STICK]
+        )
+        return (
+            stored_firewood_minutes
+            + stored_stick_minutes
+            + self.get_remaining_fuel_minutes(current_time)
+        )
+
+    def get_base_summary(self, current_time: int) -> BaseSummary:
+        """Return a frozen point-in-time snapshot of the full base state."""
+
+        return BaseSummary(
+            storage=dict(self.base_storage),
+            water_supply_ml=self.water_supply_ml,
+            fire_lit=self.is_fire_lit(),
+            remaining_fuel_minutes=self.get_remaining_fuel_minutes(current_time),
+            total_dirtiness=self.get_total_dirtiness(),
+            live_carcass_count=len(self.live_carcasses),
+            placed_resting_spots=dict(self.placed_resting_spots),
+        )
 
     def has_placed_spot(self, villager_id: str) -> bool:
         """Return whether the villager currently has a resting spot on the ground."""
