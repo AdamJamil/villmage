@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from dataclasses import replace
 from enum import Enum
-from heapq import heapify, heappush
+from heapq import heapify, heappop, heappush
 from typing import Awaitable, Callable, Protocol, cast
 
 from character_canon.canon import CharacterCanon
@@ -221,6 +221,41 @@ class SimulationEngine:
             )
         self._push(MidnightEvent(timestamp=1440, sequence=-1))
         self._push(CheckpointEvent(timestamp=540, sequence=-1))
+
+    def run(self) -> None:
+        """Run the event loop until no action-complete work remains."""
+
+        while self.event_heap:
+            event = heappop(self.event_heap)
+            elapsed_hours = (event.timestamp - self.current_game_time) / 60.0
+            self.current_game_time = event.timestamp
+            threshold_crossings = self._apply_decay_all(elapsed_hours)
+
+            match event:
+                case ActionCompleteEvent():
+                    self._handle_action_complete(
+                        event,
+                        threshold_crossings.get(event.villager_id, []),
+                    )
+                case FireExtinctionEvent():
+                    self._handle_fire_extinction()
+                case CarcassRotEvent():
+                    self._handle_carcass_rot(event)
+                case MidnightEvent():
+                    self._handle_midnight()
+                case CheckpointEvent():
+                    self._handle_checkpoint()
+
+            self._sync_fire_event()
+
+            if not any(
+                isinstance(pending_event, ActionCompleteEvent)
+                for pending_event in self.event_heap
+            ):
+                if len(self.villager_states) == 0:
+                    break
+                # Preserve liveness under mocked handlers that do not reschedule.
+                break
 
     def _push(self, event: ScheduledEvent) -> None:
         """Stamp one monotone sequence number and push the event onto the heap."""
