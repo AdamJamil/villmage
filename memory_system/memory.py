@@ -360,3 +360,14 @@ class MemorySystem:
                 for other_villager_id, record in self._relationships[villager_id].items()
             },
         )
+
+    def get_relationship_record(
+        self,
+        speaker_id: VillagerId,
+        subject_id: VillagerId,
+    ) -> RelationshipRecord:
+        """Return a copied directional relationship record for one ordered pair."""
+
+        return self._copy_relationship_record(
+            self._relationships[speaker_id][subject_id]
+        )

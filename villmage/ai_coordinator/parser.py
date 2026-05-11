@@ -6,6 +6,9 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator
 
 from action_system.types import ActionList, ActionType, ExploreResource, SelectedAction, ValidAction
 from llm_client.types import PromptSegment
@@ -24,6 +27,7 @@ from villmage.game_types import CraftableItem, ItemType
 
 
 _FAILURE_LOG_PATH = Path("data/llm_failures.jsonl")
+_RETRY_LOGGING: ContextVar[bool] = ContextVar("_RETRY_LOGGING", default=False)
 _NO_ARG_ACTION_TYPES: frozenset[ActionType] = frozenset(
     {
         ActionType.PLACE_BED_ROLL,
@@ -66,6 +70,17 @@ class ParseError(Exception):
     """Raised when one LLM response fails JSON or schema validation."""
 
 
+@contextmanager
+def retry_logging(is_retry: bool) -> Iterator[None]:
+    """Temporarily mark parse failures within the block as retry attempts."""
+
+    token = _RETRY_LOGGING.set(is_retry)
+    try:
+        yield
+    finally:
+        _RETRY_LOGGING.reset(token)
+
+
 def _serialize_prompt(prompt: list[PromptSegment]) -> list[PromptSegment]:
     """Return a shallow prompt copy for stable failure-log serialization."""
 
@@ -98,11 +113,12 @@ def _raise_parse_error(
     ctx: ParseContext,
     raw_response: str,
     message: str,
-    is_retry: bool = False,
+    is_retry: bool | None = None,
 ) -> None:
     """Write the failure record and then raise ParseError with the same message."""
 
-    _write_failure_log(ctx, raw_response, message, is_retry)
+    retry_flag = _RETRY_LOGGING.get() if is_retry is None else is_retry
+    _write_failure_log(ctx, raw_response, message, retry_flag)
     raise ParseError(message)
 
 
