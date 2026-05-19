@@ -1,0 +1,1 @@
+Two files: `types.py` for the pure data type definitions (Profession enum, VillagerCanon, WorldBackstory) and `canon.py` for the populated CharacterCanon class and its four read-only accessors. Dependencies flow one way — `canon.py` imports from `types.py`, nothing else. The hardcoded villager prose lives in `canon.py` alongside the class that owns it.
