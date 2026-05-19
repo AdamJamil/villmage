@@ -1,0 +1,3 @@
+Created [subsystems/PROPOSAL.md](/home/tack/code/villmage/subsystems/PROPOSAL.md) with a 10-subsystem high-level architecture covering the full spec and making the boundaries explicit through responsibility sections.
+
+The split keeps the main joints clean: authored identity, shared world state, simulation scheduling, action resolution, survival formulas, social flow, memory/relationships, model I/O, adaptive tuning, and replay/observability. I did not add lower-level objects or implementation structure in the proposal.
