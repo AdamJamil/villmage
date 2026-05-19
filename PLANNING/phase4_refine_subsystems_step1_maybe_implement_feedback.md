@@ -1,0 +1,5 @@
+Updated [subsystems/DEFINITION.md](/home/tack/code/villmage/subsystems/DEFINITION.md) to incorporate the feedback that materially sharpens subsystem joints.
+
+The main changes were architectural, not additive: `Simulation Orchestrator` is now a thinner `Turn And Time Engine`, the `Action System` to `Social Interaction` handoff is explicit, `Survival State` now distinguishes ledgers from derived interpretations, `Memory And Relationships` explicitly consumes perspective-scoped experience events, and `Adaptive Balance Controller` is constrained to a tiny named modifier surface. I also clarified that `World State Model` should be organized into explicit state domains and that replay should key off ordered domain events rather than becoming coupled to arbitrary live reads.
+
+No code or tests were involved here; this was a definition-only refinement.
