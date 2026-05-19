@@ -1,0 +1,8 @@
+The plan is written at `diffs/ai_coordinator_plan.md`. Six diffs:
+
+1. **types.py** — all enums and dataclasses; tests verify exact enum values, optional field defaults, and the grouping contract of `RelationshipRecord` and `PromptPackage`
+2. **action selection prompt** — `assemble_action_selection` only; tests verify the 10-segment order (REQ-224), cache breakpoint positions, that dynamic fields never appear before breakpoints, and that relationship data co-locates with the bio in segment 4
+3. **conversation/social prompts** — remaining 5 `assemble_*` functions; key test is calling `assemble_relationship_update` with swapped speaker/subject and asserting the two packages are not identical (catching the semantic reversal the impl doc explicitly warns about)
+4. **parser infrastructure + simple parsers** — `ParseError`, `_write_failure_log`, and 3 simple parsers; tests verify the failure log is appended (not overwritten), both entries logged for both failures, `is_retry` flag faithfully forwarded
+5. **complex parsers** — 3 constraint-heavy parsers; tests cover INVR-60 (can't offer what you don't have), BHVR-63 (ACCEPT only after MAKE_OFFER, including `last_other_action=None`), and the critical case that missing `resp` for actions 3–8 is a `ParseError`, not a silent downgrade to SILENT
+6. **AICoordinator class** — tests verify the retry-once sequence logs both failures with correct `is_retry` flags, `select_action` reads all five subsystems, thought absence propagates as `None`, and `get_relationship_update` calls memory with the correct ordered pair
