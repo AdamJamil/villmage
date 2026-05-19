@@ -1,0 +1,3 @@
+Wrote the corrected architecture to [spec/VERIFIED.md](/home/tack/code/villmage/spec/VERIFIED.md).
+
+This version removes a few unjustified inferences from the previous pass, tightens vague ownership language around time progression and action effects, and adds an explicit ownership-friction section for the places where the spec genuinely leaves room for interpretation. No code or tests were involved.
