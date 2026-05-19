@@ -1,0 +1,104 @@
+{
+  "game_time": 360,
+  "villager_states": [
+    {
+      "villager_id": "aldric",
+      "wakefulness": 100,
+      "satiation": 1500,
+      "hydration": 5000,
+      "social_joy": 45,
+      "connectedness": 70,
+      "cleanliness": 80,
+      "inventory": {
+        "PEACH": 1
+      },
+      "sleep_spot_claim": "BED_ROLL",
+      "crafting_in_progress": null,
+      "cooking_paused": false,
+      "current_action": null,
+      "last_rest_game_time": 300,
+      "awake_minutes_since_compaction": 60,
+      "is_alive": true
+    },
+    {
+      "villager_id": "sewalt",
+      "wakefulness": 90,
+      "satiation": 1400,
+      "hydration": 4700,
+      "social_joy": 35,
+      "connectedness": 55,
+      "cleanliness": 78,
+      "inventory": {},
+      "sleep_spot_claim": null,
+      "crafting_in_progress": null,
+      "cooking_paused": false,
+      "current_action": null,
+      "last_rest_game_time": 280,
+      "awake_minutes_since_compaction": 75,
+      "is_alive": true
+    }
+  ],
+  "world_state": {
+    "base_storage": {
+      "PEACH": 2,
+      "FIREWOOD": 3
+    },
+    "water_supply_ml": 9000,
+    "fire": {
+      "lit": false,
+      "fuel_queue": [],
+      "extinction_timestamp": null
+    },
+    "dirtiness_counts": {
+      "MEAT_SCRAPS": 1
+    },
+    "placed_resting_spots": {
+      "aldric": "BED_ROLL"
+    },
+    "live_carcasses": [
+      {
+        "id": 1,
+        "arrival_timestamp": 350
+      }
+    ],
+    "next_carcass_id": 2
+  },
+  "memory_state": [
+    {
+      "villager_id": "aldric",
+      "short_term_memories": [
+        {
+          "game_time": 350,
+          "text": "Before checkpoint"
+        }
+      ],
+      "medium_term_memories": [],
+      "long_term_memories": [],
+      "active_context_log": [],
+      "relationships": {
+        "sewalt": {
+          "description": "Steady friend.",
+          "recent_impressions": [
+            "Helped with camp."
+          ]
+        }
+      },
+      "last_long_term_compaction_day": 0
+    },
+    {
+      "villager_id": "sewalt",
+      "short_term_memories": [],
+      "medium_term_memories": [],
+      "long_term_memories": [],
+      "active_context_log": [],
+      "relationships": {},
+      "last_long_term_compaction_day": 0
+    }
+  ],
+  "autobalance": {
+    "exploration_yield_scale": 1.0,
+    "satiation_restore_scale": 1.0,
+    "hydration_restore_scale": 1.0
+  },
+  "event_heap": []
+}
