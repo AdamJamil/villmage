@@ -1,0 +1,210 @@
+{
+  "game_time": 360,
+  "villager_states": [
+    {
+      "villager_id": "aldric",
+      "wakefulness": 72,
+      "satiation": 1280,
+      "hydration": 4100,
+      "social_joy": 82,
+      "connectedness": 64,
+      "cleanliness": 91,
+      "inventory": {
+        "PEACH": 1,
+        "COOKED_MEAT": 1
+      },
+      "sleep_spot_claim": "BED_ROLL",
+      "crafting_in_progress": null,
+      "cooking_paused": false,
+      "current_action": null,
+      "last_rest_game_time": 300,
+      "awake_minutes_since_compaction": 60,
+      "is_alive": true
+    },
+    {
+      "villager_id": "sewalt",
+      "wakefulness": 22,
+      "satiation": 620,
+      "hydration": 1800,
+      "social_joy": 38,
+      "connectedness": 48,
+      "cleanliness": 44,
+      "inventory": {
+        "STICK": 2
+      },
+      "sleep_spot_claim": null,
+      "crafting_in_progress": null,
+      "cooking_paused": false,
+      "current_action": null,
+      "last_rest_game_time": 120,
+      "awake_minutes_since_compaction": 160,
+      "is_alive": true
+    },
+    {
+      "villager_id": "maela",
+      "wakefulness": 58,
+      "satiation": 980,
+      "hydration": 2600,
+      "social_joy": 26,
+      "connectedness": 35,
+      "cleanliness": 18,
+      "inventory": {
+        "RAW_MEAT": 1
+      },
+      "sleep_spot_claim": null,
+      "crafting_in_progress": null,
+      "cooking_paused": false,
+      "current_action": null,
+      "last_rest_game_time": 210,
+      "awake_minutes_since_compaction": 140,
+      "is_alive": true
+    }
+  ],
+  "world_state": {
+    "base_storage": {
+      "PEACH": 2,
+      "FIREWOOD": 3,
+      "STICK": 4
+    },
+    "water_supply_ml": 7000,
+    "fire": {
+      "lit": true,
+      "fuel_queue": [],
+      "extinction_timestamp": 480
+    },
+    "dirtiness_counts": {
+      "MEAT_SCRAPS": 1,
+      "CARCASS_REMAINS": 1
+    },
+    "placed_resting_spots": {
+      "aldric": "BED_ROLL",
+      "sewalt": "COT"
+    },
+    "live_carcasses": [
+      {
+        "id": 1,
+        "arrival_timestamp": 300
+      }
+    ],
+    "next_carcass_id": 2
+  },
+  "memory_state": [
+    {
+      "villager_id": "aldric",
+      "short_term_memories": [
+        {
+          "game_time": 330,
+          "text": "The camp still smells like smoke."
+        }
+      ],
+      "medium_term_memories": [
+        {
+          "game_time": 210,
+          "text": "Sewalt stays level even when supplies dip."
+        }
+      ],
+      "long_term_memories": [
+        {
+          "game_time": 90,
+          "text": "Maela burns bright and burns out hard."
+        }
+      ],
+      "active_context_log": [],
+      "relationships": {
+        "sewalt": {
+          "description": "A reliable pair of hands.",
+          "recent_impressions": [
+            "Stayed calm during the watch."
+          ]
+        },
+        "maela": {
+          "description": "Brilliant, but fraying at the edges.",
+          "recent_impressions": [
+            "Pushed too hard again."
+          ]
+        }
+      },
+      "last_long_term_compaction_day": 0
+    },
+    {
+      "villager_id": "sewalt",
+      "short_term_memories": [
+        {
+          "game_time": 340,
+          "text": "Aldric overprepares, but that keeps us fed."
+        }
+      ],
+      "medium_term_memories": [
+        {
+          "game_time": 250,
+          "text": "Maela never stops moving until she crashes."
+        }
+      ],
+      "long_term_memories": [
+        {
+          "game_time": 80,
+          "text": "The camp only works when someone keeps it steady."
+        }
+      ],
+      "active_context_log": [],
+      "relationships": {
+        "aldric": {
+          "description": "Dependable and practical.",
+          "recent_impressions": [
+            "Shared food without making a fuss."
+          ]
+        },
+        "maela": {
+          "description": "Sharp-minded, unstable under strain.",
+          "recent_impressions": [
+            "Skipped rest again."
+          ]
+        }
+      },
+      "last_long_term_compaction_day": 0
+    },
+    {
+      "villager_id": "maela",
+      "short_term_memories": [
+        {
+          "game_time": 350,
+          "text": "The fire keeps hissing like it's trying to warn me."
+        }
+      ],
+      "medium_term_memories": [
+        {
+          "game_time": 205,
+          "text": "Aldric watches everyone for cracks."
+        }
+      ],
+      "long_term_memories": [
+        {
+          "game_time": 75,
+          "text": "Sewalt rarely wastes words, and usually means them."
+        }
+      ],
+      "active_context_log": [],
+      "relationships": {
+        "aldric": {
+          "description": "Protective in a way that can feel smothering.",
+          "recent_impressions": [
+            "Hovered again when I looked tired."
+          ]
+        },
+        "sewalt": {
+          "description": "Steady enough to lean on.",
+          "recent_impressions": [
+            "Quietly fixed the cot."
+          ]
+        }
+      },
+      "last_long_term_compaction_day": 0
+    }
+  ],
+  "autobalance": {
+    "exploration_yield_scale": 1.0,
+    "satiation_restore_scale": 1.0,
+    "hydration_restore_scale": 1.0
+  },
+  "event_heap": []
+}
