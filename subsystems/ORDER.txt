@@ -1,0 +1,1 @@
+llm_client,character_canon,world_state,villager_state,memory_system,action_system,ai_coordinator,conversation_system,observability,simulation_engine
