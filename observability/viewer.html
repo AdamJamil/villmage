@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Villmage Observability Viewer</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #101418;
+      color: #f2f4f7;
+    }
+
+    main {
+      padding: 24px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Villmage Observability Viewer</h1>
+    <p>Replay engine scaffold loaded.</p>
+  </main>
+  <script>
+    (function initializeObservabilityViewer(globalScope) {
+      "use strict";
+
+      /**
+       * Deep-clone one JSON-safe value.
+       *
+       * @template T
+       * @param {T} value
+       * @returns {T}
+       */
+      function cloneJsonValue(value) {
+        return JSON.parse(JSON.stringify(value));
+      }
+
+      /**
+       * Normalize one data-dir input for URL composition.
+       *
+       * @param {string} dataDir
+       * @returns {string}
+       */
+      function normalizeDataDir(dataDir) {
+        return dataDir.endsWith("/") ? dataDir.slice(0, -1) : dataDir;
+      }
+
+      /**
+       * Parse one JSON-encoded field-change value.
+       *
+       * @param {string} rawValue
+       * @returns {unknown}
+       */
+      function parseFieldValue(rawValue) {
+        return JSON.parse(rawValue);
+      }
+
+      /**
+       * Return all JSON checkpoint URLs linked from one directory listing.
+       *
+       * @param {string} listingHtml
+       * @param {string} baseUrl
+       * @returns {string[]}
+       */
+      function parseCheckpointUrls(listingHtml, baseUrl) {
+        const urls = [];
+        const hrefPattern = /href=(["'])(.*?)\1/gi;
+        for (const match of listingHtml.matchAll(hrefPattern)) {
+          const href = match[2];
+          if (!href.toLowerCase().endsWith(".json")) {
+            continue;
+          }
+          urls.push(new URL(href, baseUrl).toString());
+        }
+        return urls;
+      }
+
+      /**
+       * Return a new set populated from one iterable of strings.
+       *
+       * @param {Iterable<string>} values
+       * @returns {Set<string>}
+       */
+      function cloneStringSet(values) {
+        return new Set(values);
+      }
+
+      /**
+       * Return the total dirtiness represented by one checkpoint world state.
+       *
+       * @param {{dirtiness_counts?: Record<string, number>}} worldState
+       * @returns {number}
+       */
+      function getTotalDirtiness(worldState) {
+        const counts = worldState.dirtiness_counts || {};
+        return Object.values(counts).reduce(
+          (total, count) => total + Number(count),
+          0,
+        );
+      }
+
+      /**
+       * Return a zero-free shallow copy of one numeric map.
+       *
+       * @param {Record<string, number>} values
+       * @returns {Record<string, number>}
+       */
+      function filterZeroValues(values) {
+        const filtered = {};
+        for (const [key, value] of Object.entries(values)) {
+          if (Number(value) !== 0) {
+            filtered[key] = Number(value);
+          }
+        }
+        return filtered;
+      }
+
+      /**
+       * Return one relation-view object from checkpoint relationship data.
+       *
+       * @param {Record<string, {description: string, recent_impressions: string[]}>} relationships
+       * @returns {{relationship_descriptions: Record<string, string>, recent_impressions: Record<string, string[]>}}
+       */
+      function buildRelationshipViews(relationships) {
+        const relationshipDescriptions = {};
+        const recentImpressions = {};
+        for (const [subjectId, record] of Object.entries(relationships)) {
+          relationshipDescriptions[subjectId] = record.description;
+          recentImpressions[subjectId] = record.recent_impressions.slice();
+        }
+        return {
+          relationship_descriptions: relationshipDescriptions,
+          recent_impressions: recentImpressions,
+        };
+      }
+
+      /**
+       * Return one memory-text list sorted newest-first.
+       *
+       * @param {{game_time: number, text: string}[]} memories
+       * @returns {string[]}
+       */
+      function buildMemoryTexts(memories) {
+        return memories
+          .slice()
+          .sort((left, right) => right.game_time - left.game_time)
+          .map((entry) => entry.text);
+      }
+
+      /**
+       * Return the viewer-state projection for one villager checkpoint entry.
+       *
+       * @param {Record<string, unknown>} villagerState
+       * @param {{short_term_memories: {game_time: number, text: string}[], medium_term_memories: {game_time: number, text: string}[], long_term_memories: {game_time: number, text: string}[], relationships: Record<string, {description: string, recent_impressions: string[]}>} | null} memoryState
+       * @param {Set<string>} changedFields
+       * @returns {Record<string, unknown>}
+       */
+      function buildVillagerViewerState(villagerState, memoryState, changedFields) {
+        const relationships = buildRelationshipViews(
+          memoryState === null ? {} : memoryState.relationships,
+        );
+        return {
+          ...cloneJsonValue(villagerState),
+          inventory: filterZeroValues(
+            /** @type {Record<string, number>} */ (villagerState.inventory || {}),
+          ),
+          changed_fields: cloneStringSet(changedFields),
+          short_term_memory_texts: buildMemoryTexts(
+            memoryState === null ? [] : memoryState.short_term_memories,
+          ),
+          medium_term_memory_texts: buildMemoryTexts(
+            memoryState === null ? [] : memoryState.medium_term_memories,
+          ),
+          long_term_memory_texts: buildMemoryTexts(
+            memoryState === null ? [] : memoryState.long_term_memories,
+          ),
+          relationship_descriptions: relationships.relationship_descriptions,
+          recent_impressions: relationships.recent_impressions,
+        };
+      }
+
+      /**
+       * Return the viewer-state projection for one world-state checkpoint entry.
+       *
+       * @param {Record<string, unknown>} worldState
+       * @param {number} targetTime
+       * @param {Set<string>} changedFields
+       * @returns {Record<string, unknown>}
+       */
+      function buildWorldViewerState(worldState, targetTime, changedFields) {
+        const fire = /** @type {{lit?: boolean, extinction_timestamp?: number | null}} */ (
+          worldState.fire || {}
+        );
+        const extinctionTimestamp = fire.extinction_timestamp;
+        const remainingMinutes =
+          fire.lit && typeof extinctionTimestamp === "number"
+            ? Math.max(0, extinctionTimestamp - targetTime)
+            : 0;
+        return {
+          base_storage: filterZeroValues(
+            /** @type {Record<string, number>} */ (worldState.base_storage || {}),
+          ),
+          water_supply_ml: Number(worldState.water_supply_ml || 0),
+          water_supply_liters: Number(worldState.water_supply_ml || 0) / 1000,
+          fire_lit: Boolean(fire.lit),
+          fire_remaining_minutes: remainingMinutes,
+          total_dirtiness: getTotalDirtiness(
+            /** @type {{dirtiness_counts?: Record<string, number>}} */ (worldState),
+          ),
+          placed_resting_spots: cloneJsonValue(
+            /** @type {Record<string, string>} */ (worldState.placed_resting_spots || {}),
+          ),
+          live_carcass_count: Array.isArray(worldState.live_carcasses)
+            ? worldState.live_carcasses.length
+            : 0,
+          changed_fields: cloneStringSet(changedFields),
+        };
+      }
+
+      /**
+       * Apply one nested object-field write.
+       *
+       * @param {Record<string, unknown>} root
+       * @param {string} fieldPath
+       * @param {unknown} nextValue
+       * @returns {void}
+       */
+      function applyObjectFieldChange(root, fieldPath, nextValue) {
+        const pathParts = fieldPath.split(".");
+        let current = root;
+        for (const pathPart of pathParts.slice(0, -1)) {
+          const nestedValue = current[pathPart];
+          if (
+            typeof nestedValue !== "object" ||
+            nestedValue === null ||
+            Array.isArray(nestedValue)
+          ) {
+            current[pathPart] = {};
+          }
+          current = /** @type {Record<string, unknown>} */ (current[pathPart]);
+        }
+        current[pathParts[pathParts.length - 1]] = nextValue;
+      }
+
+      /**
+       * Return the living-villager replay base plus memory lookup for one checkpoint.
+       *
+       * @param {Record<string, unknown>} checkpoint
+       * @returns {{villagerStates: Map<string, Record<string, unknown>>, memoryStates: Map<string, Record<string, unknown>>, worldState: Record<string, unknown>}}
+       */
+      function cloneCheckpointState(checkpoint) {
+        const villagerStates = new Map();
+        const checkpointVillagers = /** @type {Record<string, unknown>[]} */ (
+          checkpoint.villager_states || []
+        );
+        for (const villagerState of checkpointVillagers) {
+          const villagerId = String(villagerState.villager_id);
+          villagerStates.set(villagerId, cloneJsonValue(villagerState));
+        }
+
+        const memoryStates = new Map();
+        const checkpointMemories = /** @type {Record<string, unknown>[]} */ (
+          checkpoint.memory_state || []
+        );
+        for (const memoryState of checkpointMemories) {
+          const villagerId = String(memoryState.villager_id);
+          memoryStates.set(villagerId, cloneJsonValue(memoryState));
+        }
+
+        return {
+          villagerStates,
+          memoryStates,
+          worldState: cloneJsonValue(
+            /** @type {Record<string, unknown>} */ (checkpoint.world_state || {}),
+          ),
+        };
+      }
+
+      /**
+       * Apply one non-memory delta record to a living villager.
+       *
+       * @param {Record<string, unknown>} villagerState
+       * @param {{changes?: {field: string, new_value: string}[]}} deltaRecord
+       * @returns {void}
+       */
+      function applyVillagerDelta(villagerState, deltaRecord) {
+        const changes = deltaRecord.changes || [];
+        for (const change of changes) {
+          if (deltaRecord.kind === 2) {
+            const inventory = /** @type {Record<string, number>} */ (
+              villagerState.inventory || {}
+            );
+            inventory[change.field] = Number(parseFieldValue(change.new_value));
+            villagerState.inventory = inventory;
+            continue;
+          }
+          applyObjectFieldChange(
+            villagerState,
+            change.field,
+            parseFieldValue(change.new_value),
+          );
+        }
+      }
+
+      /**
+       * Apply one world-state delta record to the raw replay world state.
+       *
+       * @param {Record<string, unknown>} worldState
+       * @param {{changes?: {field: string, new_value: string}[]}} deltaRecord
+       * @returns {void}
+       */
+      function applyWorldDelta(worldState, deltaRecord) {
+        const changes = deltaRecord.changes || [];
+        for (const change of changes) {
+          applyObjectFieldChange(
+            worldState,
+            change.field,
+            parseFieldValue(change.new_value),
+          );
+        }
+      }
+
+      /**
+       * Apply one memory delta record to the raw replay memory state.
+       *
+       * @param {Record<string, unknown>} memoryState
+       * @param {{game_time: number, memory_kind?: string, content?: string, subject_id?: string | null}} deltaRecord
+       * @returns {void}
+       */
+      function applyMemoryDelta(memoryState, deltaRecord) {
+        const memoryKind = deltaRecord.memory_kind;
+        const content = deltaRecord.content;
+        if (typeof memoryKind !== "string" || typeof content !== "string") {
+          return;
+        }
+        if (memoryKind === "short_term") {
+          memoryState.short_term_memories = [
+            { game_time: deltaRecord.game_time, text: content },
+            .../** @type {{game_time: number, text: string}[]} */ (
+              memoryState.short_term_memories || []
+            ),
+          ];
+          return;
+        }
+        if (memoryKind === "medium_term") {
+          memoryState.medium_term_memories = [
+            { game_time: deltaRecord.game_time, text: content },
+            .../** @type {{game_time: number, text: string}[]} */ (
+              memoryState.medium_term_memories || []
+            ),
+          ];
+          return;
+        }
+        if (memoryKind === "long_term") {
+          memoryState.long_term_memories = [
+            { game_time: deltaRecord.game_time, text: content },
+            .../** @type {{game_time: number, text: string}[]} */ (
+              memoryState.long_term_memories || []
+            ),
+          ];
+          return;
+        }
+
+        const subjectId = deltaRecord.subject_id;
+        if (typeof subjectId !== "string") {
+          return;
+        }
+        const relationships = /** @type {Record<string, {description: string, recent_impressions: string[]}>} */ (
+          memoryState.relationships || {}
+        );
+        const existingRecord = relationships[subjectId] || {
+          description: "",
+          recent_impressions: [],
+        };
+        if (memoryKind === "relationship_desc") {
+          relationships[subjectId] = {
+            description: content,
+            recent_impressions: existingRecord.recent_impressions.slice(),
+          };
+          memoryState.relationships = relationships;
+          return;
+        }
+        if (memoryKind === "impression") {
+          relationships[subjectId] = {
+            description: existingRecord.description,
+            recent_impressions: [content, ...existingRecord.recent_impressions].slice(0, 3),
+          };
+          memoryState.relationships = relationships;
+        }
+      }
+
+      /**
+       * Return all checkpoint records sorted chronologically.
+       *
+       * @param {string} dataDir
+       * @returns {Promise<Record<string, unknown>[]>}
+       */
+      async function loadAllCheckpoints(dataDir) {
+        const normalizedDataDir = normalizeDataDir(dataDir);
+        const listingUrl = `${normalizedDataDir}/checkpoints/`;
+        const listingResponse = await fetch(listingUrl);
+        const listingHtml = await listingResponse.text();
+        const checkpointUrls = parseCheckpointUrls(listingHtml, listingUrl);
+        const checkpoints = await Promise.all(
+          checkpointUrls.map(async (checkpointUrl) => {
+            const checkpointResponse = await fetch(checkpointUrl);
+            return checkpointResponse.json();
+          }),
+        );
+        checkpoints.sort(
+          (left, right) => Number(left.game_time) - Number(right.game_time),
+        );
+        return checkpoints;
+      }
+
+      /**
+       * Return all delta records grouped by game time.
+       *
+       * @param {string} dataDir
+       * @returns {Promise<Map<number, Record<string, unknown>[]>>}
+       */
+      async function loadDeltaIndex(dataDir) {
+        const normalizedDataDir = normalizeDataDir(dataDir);
+        const response = await fetch(`${normalizedDataDir}/state_deltas.jsonl`);
+        const rawText = await response.text();
+        const deltaIndex = new Map();
+        for (const rawLine of rawText.split(/\r?\n/)) {
+          const trimmedLine = rawLine.trim();
+          if (trimmedLine === "") {
+            continue;
+          }
+          const deltaRecord = JSON.parse(trimmedLine);
+          const gameTime = Number(deltaRecord.game_time);
+          const existingBucket = deltaIndex.get(gameTime) || [];
+          existingBucket.push(deltaRecord);
+          deltaIndex.set(gameTime, existingBucket);
+        }
+        return deltaIndex;
+      }
+
+      /**
+       * Reconstruct living villager and world viewer state at one target time.
+       *
+       * @param {Record<string, unknown>[]} checkpoints
+       * @param {Map<number, Record<string, unknown>[]>} deltaIndex
+       * @param {number} targetTime
+       * @returns {{villager_states: Map<string, Record<string, unknown>>, world_state: Record<string, unknown>}}
+       */
+      function reconstructStateAt(checkpoints, deltaIndex, targetTime) {
+        const checkpoint = checkpoints
+          .filter((entry) => Number(entry.game_time) <= targetTime)
+          .sort((left, right) => Number(right.game_time) - Number(left.game_time))[0];
+        if (checkpoint === undefined) {
+          throw new Error(`No checkpoint exists at or before target time ${targetTime}.`);
+        }
+
+        const checkpointTime = Number(checkpoint.game_time);
+        const replayState = cloneCheckpointState(checkpoint);
+        const villagerChangedFields = new Map();
+        const worldChangedFields = new Set();
+        for (const villagerId of replayState.villagerStates.keys()) {
+          villagerChangedFields.set(villagerId, new Set());
+        }
+
+        const relevantTimes = [...deltaIndex.keys()]
+          .filter((gameTime) => checkpointTime < gameTime && gameTime <= targetTime)
+          .sort((left, right) => left - right);
+
+        for (const gameTime of relevantTimes) {
+          const deltaRecords = deltaIndex.get(gameTime) || [];
+          for (const deltaRecord of deltaRecords) {
+            if (deltaRecord.kind === 1 || deltaRecord.kind === 2) {
+              const villagerId = String(deltaRecord.villager_id);
+              const villagerState = replayState.villagerStates.get(villagerId);
+              if (villagerState === undefined) {
+                continue;
+              }
+              applyVillagerDelta(villagerState, deltaRecord);
+              if (gameTime === targetTime) {
+                const changedFields = villagerChangedFields.get(villagerId) || new Set();
+                for (const change of deltaRecord.changes || []) {
+                  changedFields.add(change.field);
+                }
+                villagerChangedFields.set(villagerId, changedFields);
+              }
+              continue;
+            }
+
+            if (deltaRecord.kind === 3) {
+              applyWorldDelta(replayState.worldState, deltaRecord);
+              if (gameTime === targetTime) {
+                for (const change of deltaRecord.changes || []) {
+                  worldChangedFields.add(change.field);
+                }
+              }
+              continue;
+            }
+
+            if (deltaRecord.kind === 4) {
+              const villagerId = String(deltaRecord.villager_id);
+              const memoryState = replayState.memoryStates.get(villagerId);
+              if (memoryState !== undefined) {
+                applyMemoryDelta(memoryState, deltaRecord);
+              }
+            }
+          }
+        }
+
+        const villagerStates = new Map();
+        for (const [villagerId, villagerState] of replayState.villagerStates.entries()) {
+          const memoryState = replayState.memoryStates.get(villagerId) || null;
+          villagerStates.set(
+            villagerId,
+            buildVillagerViewerState(
+              villagerState,
+              memoryState,
+              villagerChangedFields.get(villagerId) || new Set(),
+            ),
+          );
+        }
+
+        return {
+          villager_states: villagerStates,
+          world_state: buildWorldViewerState(
+            replayState.worldState,
+            targetTime,
+            worldChangedFields,
+          ),
+        };
+      }
+
+      globalScope.villmageObservability = {
+        loadAllCheckpoints,
+        loadDeltaIndex,
+        reconstructStateAt,
+      };
+    })(globalThis);
+  </script>
+</body>
+</html>
