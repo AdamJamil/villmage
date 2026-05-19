@@ -1,0 +1,2452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Villmage Observability Viewer</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1419;
+      --panel: #16202a;
+      --panel-raised: #1d2935;
+      --panel-border: #2a3a49;
+      --panel-border-strong: #3b5164;
+      --text: #edf3f8;
+      --muted: #91a3b4;
+      --accent: #8ab4f8;
+      --accent-strong: #b8d8ff;
+      --highlight-bg: rgba(138, 180, 248, 0.2);
+      --highlight-border: #8ab4f8;
+      --danger: #ef9a9a;
+      --shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(53, 79, 102, 0.36), transparent 30%),
+        linear-gradient(180deg, #0c1116 0%, var(--bg) 100%);
+      color: var(--text);
+    }
+
+    #viewer-root {
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    .shell {
+      display: grid;
+      gap: 20px;
+      min-height: calc(100vh - 48px);
+      grid-template-columns: minmax(280px, 340px) minmax(360px, 1fr) minmax(320px, 380px);
+    }
+
+    .panel {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 16%), var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px 18px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .panel-title {
+      margin: 0;
+      font-size: 0.95rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-strong);
+    }
+
+    .panel-subtitle {
+      margin: 2px 0 0;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .scroll-column {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .column-body {
+      padding: 16px 18px 20px;
+    }
+
+    .selector-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .villager-chip {
+      appearance: none;
+      border: 1px solid var(--panel-border-strong);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 8px 12px;
+      cursor: pointer;
+      transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+    }
+
+    .villager-chip:hover,
+    .villager-chip:focus-visible {
+      background: rgba(138, 180, 248, 0.12);
+      border-color: var(--accent);
+      outline: none;
+      transform: translateY(-1px);
+    }
+
+    .villager-chip.is-selected {
+      background: rgba(138, 180, 248, 0.22);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 0.8rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--muted);
+    }
+
+    .status-badge.is-deceased {
+      color: var(--danger);
+      border-color: rgba(239, 154, 154, 0.36);
+      background: rgba(239, 154, 154, 0.12);
+    }
+
+    .event-log {
+      padding: 14px;
+      height: 100%;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+
+    .event-entry {
+      position: relative;
+      padding: 14px 14px 14px 18px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .event-entry + .event-entry {
+      margin-top: 10px;
+    }
+
+    .event-entry::before {
+      content: "";
+      position: absolute;
+      top: 12px;
+      bottom: 12px;
+      left: 8px;
+      width: 3px;
+      border-radius: 999px;
+      background: rgba(138, 180, 248, 0.16);
+    }
+
+    .event-entry.is-active {
+      border-color: rgba(138, 180, 248, 0.72);
+      background: rgba(138, 180, 248, 0.08);
+    }
+
+    .event-entry.is-active::before {
+      background: var(--accent);
+    }
+
+    .event-timestamp {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 0.8rem;
+      color: var(--accent-strong);
+      letter-spacing: 0.03em;
+    }
+
+    .event-text {
+      margin: 0;
+      line-height: 1.45;
+      color: var(--text);
+    }
+
+    .section {
+      margin-top: 18px;
+    }
+
+    .section:first-child {
+      margin-top: 0;
+    }
+
+    .section-title {
+      margin: 0 0 10px;
+      color: var(--accent-strong);
+      font-size: 0.85rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .meta-line {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.45;
+      font-size: 0.92rem;
+    }
+
+    .stat-grid,
+    .kv-list,
+    .memory-list,
+    .relationship-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .stat-row,
+    .kv-row,
+    .memory-item,
+    .relationship-card {
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 12px 14px;
+      transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+    }
+
+    .stat-top,
+    .kv-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .stat-name,
+    .kv-name,
+    .memory-heading,
+    .relationship-name {
+      margin: 0;
+      font-weight: 600;
+      color: #f8fbff;
+    }
+
+    .stat-value,
+    .kv-value {
+      margin: 0;
+      color: var(--accent-strong);
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+
+    .stat-description,
+    .kv-description,
+    .memory-text,
+    .relationship-text,
+    .impression-item {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.45;
+      font-size: 0.92rem;
+    }
+
+    .memory-heading {
+      margin-bottom: 8px;
+      font-size: 0.9rem;
+    }
+
+    .memory-list,
+    .relationship-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+
+    .impression-list {
+      list-style: none;
+      margin: 10px 0 0;
+      padding: 0;
+      display: grid;
+      gap: 6px;
+    }
+
+    .empty-state {
+      border: 1px dashed rgba(255, 255, 255, 0.1);
+      border-radius: 14px;
+      padding: 14px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.02);
+      line-height: 1.45;
+    }
+
+    .field-highlight {
+      border-color: var(--highlight-border);
+      background: var(--highlight-bg);
+      box-shadow: 0 0 0 1px rgba(138, 180, 248, 0.08);
+    }
+
+    .loading,
+    .error {
+      display: grid;
+      place-items: center;
+      min-height: calc(100vh - 48px);
+      padding: 24px;
+      text-align: center;
+    }
+
+    .error {
+      color: var(--danger);
+    }
+
+    @media (max-width: 1120px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+
+      .scroll-column {
+        min-height: 360px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="viewer-root" aria-live="polite">
+    <div class="loading">Loading observability viewer…</div>
+  </div>
+  <script>
+    (function initializeObservabilityViewer(globalScope) {
+      "use strict";
+
+      const MISSING_VALUE_TEXT = "None";
+      const FOOD_CALORIES = {
+        PEACH: 60,
+        COOKED_MEAT: 800,
+      };
+      const FUEL_MINUTES = {
+        FIREWOOD: 20,
+        STICK: 1,
+      };
+      const DESCRIPTION_SPECS = {
+        well_being: {
+          scale: 100,
+          tiers: [
+            [0, "You feel deathly terrible. Something is horribly wrong."],
+            [10, "Life feels rough. You're struggling."],
+            [30, "Things are okay. Could be better, could be worse."],
+            [50, "You feel pretty good about how things are going."],
+            [85, "Life is good. Really, truly good."],
+          ],
+        },
+        mood: {
+          scale: 100,
+          tiers: [
+            [0, "You feel truly miserable. Every waking moment is hell."],
+            [10, "You're in a foul mood. Irritable, drained, and withdrawn."],
+            [30, "You feel a bit flat. Not miserable, but not great either."],
+            [50, "You're in a decent mood. Nothing to complain about."],
+            [85, "You're in wonderful spirits."],
+          ],
+        },
+        health: {
+          scale: 100,
+          tiers: [
+            [0, "You are on the brink of death. You need help immediately."],
+            [10, "Your body is failing you. Everything aches and nothing feels right."],
+            [30, "You feel a little run down. Your work speed is reduced."],
+            [50, "You're in good physical shape."],
+            [85, "You feel strong and full of energy."],
+          ],
+        },
+        safety: {
+          scale: 100,
+          tiers: [
+            [0, "There is almost nothing left. Starvation or freezing feels inevitable."],
+            [10, "Stores are nearly gone. You dread what happens when they run out."],
+            [30, "Supplies are getting thin. You're starting to worry about what's ahead."],
+            [50, "You're not worried. Supplies seem adequate for now."],
+            [85, "You feel secure. There's plenty of food and fuel to last."],
+          ],
+        },
+        social_joy: {
+          scale: 100,
+          tiers: [
+            [0, "You are completely alone. Nobody cares, and you know it."],
+            [10, "You feel disconnected from everyone around you. Conversations feel hollow."],
+            [30, "Your social life is whatever. You're not lonely, but not fulfilled either."],
+            [50, "You've got good company. Things feel warm and easy."],
+            [85, "You feel loved. The people around you make life worth living."],
+          ],
+        },
+        connectedness: {
+          scale: 100,
+          tiers: [
+            [0, "You are a ghost. You could vanish and no one would notice."],
+            [10, "You feel like a stranger to everyone. Nobody really knows you."],
+            [30, "You know people, but it all feels surface level."],
+            [50, "You feel like you belong. The party knows you well."],
+            [85, "You feel connected to the people in your life."],
+          ],
+        },
+        cleanliness: {
+          scale: 100,
+          tiers: [
+            [0, "You are caked in filth. Your stench spreads miles away."],
+            [20, "You stink and feel gross."],
+            [40, "You smell a little and could use a wash."],
+            [60, "You are clean"],
+          ],
+        },
+        wakefulness: {
+          scale: 100,
+          tiers: [
+            [0, "You are on the brink of collapse. The world is fading in and out."],
+            [10, "You can barely keep your eyes open. Your thoughts are soup."],
+            [30, "You're sleepy. Everything takes a little more effort than it should."],
+            [50, "You're alert enough. No fog, no complaints."],
+            [85, "You're wide awake and sharp. The world is vivid."],
+          ],
+        },
+        satiation: {
+          scale: 100,
+          tiers: [
+            [0, "You can barely move. You are starving to death."],
+            [10, "Your body is eating itself. You need food now."],
+            [76, "You're starving. It's hard to think about anything else."],
+            [90, "You could eat. Your stomach is starting to rumble."],
+            [96, "You're perfectly full."],
+          ],
+        },
+        hydration: {
+          scale: 100,
+          tiers: [
+            [0, "You can barely swallow. Your body is shutting down."],
+            [10, "You're parched. Your head is pounding and your lips are cracking."],
+            [30, "Your mouth is dry. You need water soon."],
+            [50, "You're fine. Not thirsty, not thinking about it."],
+            [85, "You feel well hydrated."],
+          ],
+        },
+      };
+      const RAW_STAT_SPECS = [
+        { key: "wakefulness", label: "Wakefulness", maxValue: 100, decimals: 0 },
+        { key: "satiation", label: "Satiation", maxValue: 1800, decimals: 0 },
+        { key: "hydration", label: "Hydration", maxValue: 6000, decimals: 0 },
+        { key: "social_joy", label: "Social Joy", maxValue: 100, decimals: 0 },
+        { key: "connectedness", label: "Connectedness", maxValue: 100, decimals: 1 },
+        { key: "cleanliness", label: "Cleanliness", maxValue: 100, decimals: 0 },
+      ];
+      const DERIVED_STAT_SPECS = [
+        { key: "well_being", label: "Well-Being", decimals: 3 },
+        { key: "mood", label: "Mood", decimals: 3 },
+        { key: "health", label: "Health", decimals: 3 },
+        { key: "safety", label: "Safety", decimals: 3 },
+      ];
+      const APP_STATE = {
+        dom: null,
+        session: null,
+        lastRenderedLogVillagerId: null,
+        suppressScrollSync: false,
+      };
+
+      /**
+       * Deep-clone one JSON-safe value.
+       *
+       * @template T
+       * @param {T} value
+       * @returns {T}
+       */
+      function cloneJsonValue(value) {
+        return JSON.parse(JSON.stringify(value));
+      }
+
+      /**
+       * Normalize one data-dir input for URL composition.
+       *
+       * @param {string} dataDir
+       * @returns {string}
+       */
+      function normalizeDataDir(dataDir) {
+        return dataDir.endsWith("/") ? dataDir.slice(0, -1) : dataDir;
+      }
+
+      /**
+       * Parse one JSON-encoded field-change value.
+       *
+       * @param {string} rawValue
+       * @returns {unknown}
+       */
+      function parseFieldValue(rawValue) {
+        return JSON.parse(rawValue);
+      }
+
+      /**
+       * Parse one JSONL payload into objects.
+       *
+       * @param {string} rawText
+       * @returns {Record<string, unknown>[]}
+       */
+      function parseJsonLines(rawText) {
+        return rawText
+          .split(/\r?\n/)
+          .map((rawLine) => rawLine.trim())
+          .filter((rawLine) => rawLine !== "")
+          .map((rawLine) => JSON.parse(rawLine));
+      }
+
+      /**
+       * Return all JSON checkpoint URLs linked from one directory listing.
+       *
+       * @param {string} listingHtml
+       * @param {string} baseUrl
+       * @returns {string[]}
+       */
+      function parseCheckpointUrls(listingHtml, baseUrl) {
+        const urls = [];
+        const hrefPattern = /href=(["'])(.*?)\1/gi;
+        for (const match of listingHtml.matchAll(hrefPattern)) {
+          const href = match[2];
+          if (!href.toLowerCase().endsWith(".json")) {
+            continue;
+          }
+          urls.push(new URL(href, baseUrl).toString());
+        }
+        return urls;
+      }
+
+      /**
+       * Return a new set populated from one iterable of strings.
+       *
+       * @param {Iterable<string>} values
+       * @returns {Set<string>}
+       */
+      function cloneStringSet(values) {
+        return new Set(values);
+      }
+
+      /**
+       * Return the total dirtiness represented by one checkpoint world state.
+       *
+       * @param {{dirtiness_counts?: Record<string, number>}} worldState
+       * @returns {number}
+       */
+      function getTotalDirtiness(worldState) {
+        const counts = worldState.dirtiness_counts || {};
+        return Object.values(counts).reduce(
+          (total, count) => total + Number(count),
+          0,
+        );
+      }
+
+      /**
+       * Return a zero-free shallow copy of one numeric map.
+       *
+       * @param {Record<string, number>} values
+       * @returns {Record<string, number>}
+       */
+      function filterZeroValues(values) {
+        const filtered = {};
+        for (const [key, value] of Object.entries(values)) {
+          if (Number(value) !== 0) {
+            filtered[key] = Number(value);
+          }
+        }
+        return filtered;
+      }
+
+      /**
+       * Return one relation-view object from checkpoint relationship data.
+       *
+       * @param {Record<string, {description: string, recent_impressions: string[]}>} relationships
+       * @returns {{relationship_descriptions: Record<string, string>, recent_impressions: Record<string, string[]>}}
+       */
+      function buildRelationshipViews(relationships) {
+        const relationshipDescriptions = {};
+        const recentImpressions = {};
+        for (const [subjectId, record] of Object.entries(relationships)) {
+          relationshipDescriptions[subjectId] = record.description;
+          recentImpressions[subjectId] = record.recent_impressions.slice();
+        }
+        return {
+          relationship_descriptions: relationshipDescriptions,
+          recent_impressions: recentImpressions,
+        };
+      }
+
+      /**
+       * Return one memory-text list sorted newest-first.
+       *
+       * @param {{game_time: number, text: string}[]} memories
+       * @returns {string[]}
+       */
+      function buildMemoryTexts(memories) {
+        return memories
+          .slice()
+          .sort((left, right) => right.game_time - left.game_time)
+          .map((entry) => entry.text);
+      }
+
+      /**
+       * Return the viewer-state projection for one villager checkpoint entry.
+       *
+       * @param {Record<string, unknown>} villagerState
+       * @param {{short_term_memories: {game_time: number, text: string}[], medium_term_memories: {game_time: number, text: string}[], long_term_memories: {game_time: number, text: string}[], relationships: Record<string, {description: string, recent_impressions: string[]}>} | null} memoryState
+       * @param {Set<string>} changedFields
+       * @returns {Record<string, unknown>}
+       */
+      function buildVillagerViewerState(villagerState, memoryState, changedFields) {
+        const relationships = buildRelationshipViews(
+          memoryState === null ? {} : memoryState.relationships,
+        );
+        return {
+          ...cloneJsonValue(villagerState),
+          inventory: filterZeroValues(
+            /** @type {Record<string, number>} */ (villagerState.inventory || {}),
+          ),
+          changed_fields: cloneStringSet(changedFields),
+          short_term_memory_texts: buildMemoryTexts(
+            memoryState === null ? [] : memoryState.short_term_memories,
+          ),
+          medium_term_memory_texts: buildMemoryTexts(
+            memoryState === null ? [] : memoryState.medium_term_memories,
+          ),
+          long_term_memory_texts: buildMemoryTexts(
+            memoryState === null ? [] : memoryState.long_term_memories,
+          ),
+          relationship_descriptions: relationships.relationship_descriptions,
+          recent_impressions: relationships.recent_impressions,
+        };
+      }
+
+      /**
+       * Return the viewer-state projection for one world-state checkpoint entry.
+       *
+       * @param {Record<string, unknown>} worldState
+       * @param {number} targetTime
+       * @param {Set<string>} changedFields
+       * @returns {Record<string, unknown>}
+       */
+      function buildWorldViewerState(worldState, targetTime, changedFields) {
+        const fire = /** @type {{lit?: boolean, extinction_timestamp?: number | null, remaining_minutes?: number}} */ (
+          worldState.fire || {}
+        );
+        const extinctionTimestamp = fire.extinction_timestamp;
+        const waterSupplyMl =
+          typeof worldState.water_supply_liters === "number"
+            ? Number(worldState.water_supply_liters) * 1000
+            : typeof worldState.water_supply_ml === "number"
+              ? Number(worldState.water_supply_ml)
+              : 0;
+        const remainingMinutes =
+          typeof fire.remaining_minutes === "number"
+            ? Number(fire.remaining_minutes)
+            : fire.lit && typeof extinctionTimestamp === "number"
+              ? Math.max(0, extinctionTimestamp - targetTime)
+              : 0;
+        return {
+          base_storage: filterZeroValues(
+            /** @type {Record<string, number>} */ (worldState.base_storage || {}),
+          ),
+          water_supply_ml: waterSupplyMl,
+          water_supply_liters: waterSupplyMl / 1000,
+          fire_lit: Boolean(fire.lit),
+          fire_remaining_minutes: remainingMinutes,
+          total_dirtiness:
+            typeof worldState.total_dirtiness === "number"
+              ? Number(worldState.total_dirtiness)
+              : getTotalDirtiness(
+                  /** @type {{dirtiness_counts?: Record<string, number>}} */ (worldState),
+                ),
+          placed_resting_spots: cloneJsonValue(
+            /** @type {Record<string, string>} */ (worldState.placed_resting_spots || {}),
+          ),
+          live_carcass_count:
+            typeof worldState.live_carcass_count === "number"
+              ? Number(worldState.live_carcass_count)
+              : Array.isArray(worldState.live_carcasses)
+                ? worldState.live_carcasses.length
+                : 0,
+          changed_fields: cloneStringSet(changedFields),
+        };
+      }
+
+      /**
+       * Apply one nested object-field write.
+       *
+       * @param {Record<string, unknown>} root
+       * @param {string} fieldPath
+       * @param {unknown} nextValue
+       * @returns {void}
+       */
+      function applyObjectFieldChange(root, fieldPath, nextValue) {
+        const pathParts = fieldPath.split(".");
+        let current = root;
+        for (const pathPart of pathParts.slice(0, -1)) {
+          const nestedValue = current[pathPart];
+          if (
+            typeof nestedValue !== "object" ||
+            nestedValue === null ||
+            Array.isArray(nestedValue)
+          ) {
+            current[pathPart] = {};
+          }
+          current = /** @type {Record<string, unknown>} */ (current[pathPart]);
+        }
+        current[pathParts[pathParts.length - 1]] = nextValue;
+      }
+
+      /**
+       * Return one empty memory-state baseline.
+       *
+       * @param {string} villagerId
+       * @returns {Record<string, unknown>}
+       */
+      function buildEmptyMemoryState(villagerId) {
+        return {
+          villager_id: villagerId,
+          short_term_memories: [],
+          medium_term_memories: [],
+          long_term_memories: [],
+          active_context_log: [],
+          relationships: {},
+          last_long_term_compaction_day: 0,
+        };
+      }
+
+      /**
+       * Return the living-villager replay base plus memory lookup for one checkpoint.
+       *
+       * @param {Record<string, unknown>} checkpoint
+       * @returns {{villagerStates: Map<string, Record<string, unknown>>, memoryStates: Map<string, Record<string, unknown>>, worldState: Record<string, unknown>}}
+       */
+      function cloneCheckpointState(checkpoint) {
+        const villagerStates = new Map();
+        const checkpointVillagers = /** @type {Record<string, unknown>[]} */ (
+          checkpoint.villager_states || []
+        );
+        for (const villagerState of checkpointVillagers) {
+          const villagerId = String(villagerState.villager_id);
+          villagerStates.set(villagerId, cloneJsonValue(villagerState));
+        }
+
+        const memoryStates = new Map();
+        const checkpointMemories = /** @type {Record<string, unknown>[]} */ (
+          checkpoint.memory_state || []
+        );
+        for (const memoryState of checkpointMemories) {
+          const villagerId = String(memoryState.villager_id);
+          memoryStates.set(villagerId, cloneJsonValue(memoryState));
+        }
+
+        return {
+          villagerStates,
+          memoryStates,
+          worldState: cloneJsonValue(
+            /** @type {Record<string, unknown>} */ (checkpoint.world_state || {}),
+          ),
+        };
+      }
+
+      /**
+       * Apply one non-memory delta record to a living villager.
+       *
+       * @param {Record<string, unknown>} villagerState
+       * @param {{kind?: number, changes?: {field: string, new_value: string}[]}} deltaRecord
+       * @returns {void}
+       */
+      function applyVillagerDelta(villagerState, deltaRecord) {
+        const changes = deltaRecord.changes || [];
+        for (const change of changes) {
+          if (deltaRecord.kind === 2) {
+            const inventory = /** @type {Record<string, number>} */ (
+              villagerState.inventory || {}
+            );
+            inventory[change.field] = Number(parseFieldValue(change.new_value));
+            villagerState.inventory = inventory;
+            continue;
+          }
+          applyObjectFieldChange(
+            villagerState,
+            change.field,
+            parseFieldValue(change.new_value),
+          );
+        }
+      }
+
+      /**
+       * Apply one world-state delta record to the raw replay world state.
+       *
+       * @param {Record<string, unknown>} worldState
+       * @param {{changes?: {field: string, new_value: string}[]}} deltaRecord
+       * @returns {void}
+       */
+      function applyWorldDelta(worldState, deltaRecord) {
+        const changes = deltaRecord.changes || [];
+        for (const change of changes) {
+          applyObjectFieldChange(
+            worldState,
+            change.field,
+            parseFieldValue(change.new_value),
+          );
+        }
+      }
+
+      /**
+       * Apply one memory delta record to the raw replay memory state.
+       *
+       * @param {Record<string, unknown>} memoryState
+       * @param {{game_time: number, memory_kind?: string, content?: string, subject_id?: string | null}} deltaRecord
+       * @returns {void}
+       */
+      function applyMemoryDelta(memoryState, deltaRecord) {
+        const memoryKind = deltaRecord.memory_kind;
+        const content = deltaRecord.content;
+        if (typeof memoryKind !== "string" || typeof content !== "string") {
+          return;
+        }
+        if (memoryKind === "short_term") {
+          memoryState.short_term_memories = [
+            { game_time: deltaRecord.game_time, text: content },
+            .../** @type {{game_time: number, text: string}[]} */ (
+              memoryState.short_term_memories || []
+            ),
+          ];
+          return;
+        }
+        if (memoryKind === "medium_term") {
+          memoryState.medium_term_memories = [
+            { game_time: deltaRecord.game_time, text: content },
+            .../** @type {{game_time: number, text: string}[]} */ (
+              memoryState.medium_term_memories || []
+            ),
+          ];
+          return;
+        }
+        if (memoryKind === "long_term") {
+          memoryState.long_term_memories = [
+            { game_time: deltaRecord.game_time, text: content },
+            .../** @type {{game_time: number, text: string}[]} */ (
+              memoryState.long_term_memories || []
+            ),
+          ];
+          return;
+        }
+
+        const subjectId = deltaRecord.subject_id;
+        if (typeof subjectId !== "string") {
+          return;
+        }
+        const relationships = /** @type {Record<string, {description: string, recent_impressions: string[]}>} */ (
+          memoryState.relationships || {}
+        );
+        const existingRecord = relationships[subjectId] || {
+          description: "",
+          recent_impressions: [],
+        };
+        if (memoryKind === "relationship_desc") {
+          relationships[subjectId] = {
+            description: content,
+            recent_impressions: existingRecord.recent_impressions.slice(),
+          };
+          memoryState.relationships = relationships;
+          return;
+        }
+        if (memoryKind === "impression") {
+          relationships[subjectId] = {
+            description: existingRecord.description,
+            recent_impressions: [content, ...existingRecord.recent_impressions].slice(0, 3),
+          };
+          memoryState.relationships = relationships;
+        }
+      }
+
+      /**
+       * Return the ordered delta times between two times.
+       *
+       * @param {Map<number, Record<string, unknown>[]>} deltaIndex
+       * @param {number} startTimeExclusive
+       * @param {number} endTimeInclusive
+       * @returns {number[]}
+       */
+      function getRelevantDeltaTimes(deltaIndex, startTimeExclusive, endTimeInclusive) {
+        return [...deltaIndex.keys()]
+          .filter(
+            (gameTime) =>
+              startTimeExclusive < gameTime && gameTime <= endTimeInclusive,
+          )
+          .sort((left, right) => left - right);
+      }
+
+      /**
+       * Return one empty changed-field map for all living villagers in one replay state.
+       *
+       * @param {{villagerStates: Map<string, Record<string, unknown>>}} replayState
+       * @returns {Map<string, Set<string>>}
+       */
+      function createEmptyVillagerChangedFields(replayState) {
+        const villagerChangedFields = new Map();
+        for (const villagerId of replayState.villagerStates.keys()) {
+          villagerChangedFields.set(villagerId, new Set());
+        }
+        return villagerChangedFields;
+      }
+
+      /**
+       * Apply all deltas in one time range to one raw replay state.
+       *
+       * @param {{villagerStates: Map<string, Record<string, unknown>>, memoryStates: Map<string, Record<string, unknown>>, worldState: Record<string, unknown>}} replayState
+       * @param {Map<number, Record<string, unknown>[]>} deltaIndex
+       * @param {number} startTimeExclusive
+       * @param {number} targetTime
+       * @returns {{villagerChangedFields: Map<string, Set<string>>, worldChangedFields: Set<string>}}
+       */
+      function applyDeltaRange(
+        replayState,
+        deltaIndex,
+        startTimeExclusive,
+        targetTime,
+      ) {
+        const villagerChangedFields = createEmptyVillagerChangedFields(replayState);
+        const worldChangedFields = new Set();
+        const relevantTimes = getRelevantDeltaTimes(
+          deltaIndex,
+          startTimeExclusive,
+          targetTime,
+        );
+
+        for (const gameTime of relevantTimes) {
+          const deltaRecords = deltaIndex.get(gameTime) || [];
+          for (const deltaRecord of deltaRecords) {
+            if (deltaRecord.kind === 1 || deltaRecord.kind === 2) {
+              const villagerId = String(deltaRecord.villager_id);
+              const villagerState = replayState.villagerStates.get(villagerId);
+              if (villagerState === undefined) {
+                continue;
+              }
+              applyVillagerDelta(villagerState, deltaRecord);
+              if (gameTime === targetTime) {
+                const changedFields =
+                  villagerChangedFields.get(villagerId) || new Set();
+                for (const change of deltaRecord.changes || []) {
+                  changedFields.add(change.field);
+                }
+                villagerChangedFields.set(villagerId, changedFields);
+              }
+              continue;
+            }
+
+            if (deltaRecord.kind === 3) {
+              applyWorldDelta(replayState.worldState, deltaRecord);
+              if (gameTime === targetTime) {
+                for (const change of deltaRecord.changes || []) {
+                  worldChangedFields.add(change.field);
+                }
+              }
+              continue;
+            }
+
+            if (deltaRecord.kind === 4) {
+              const villagerId = String(deltaRecord.villager_id);
+              const memoryState =
+                replayState.memoryStates.get(villagerId) ||
+                buildEmptyMemoryState(villagerId);
+              applyMemoryDelta(memoryState, deltaRecord);
+              replayState.memoryStates.set(villagerId, memoryState);
+            }
+          }
+        }
+
+        return {
+          villagerChangedFields,
+          worldChangedFields,
+        };
+      }
+
+      /**
+       * Project one raw replay state into viewer-state objects.
+       *
+       * @param {{villagerStates: Map<string, Record<string, unknown>>, memoryStates: Map<string, Record<string, unknown>>, worldState: Record<string, unknown>}} replayState
+       * @param {number} targetTime
+       * @param {Map<string, Set<string>>} villagerChangedFields
+       * @param {Set<string>} worldChangedFields
+       * @returns {{villager_states: Map<string, Record<string, unknown>>, world_state: Record<string, unknown>}}
+       */
+      function buildViewerProjection(
+        replayState,
+        targetTime,
+        villagerChangedFields,
+        worldChangedFields,
+      ) {
+        const villagerStates = new Map();
+        for (const [villagerId, villagerState] of replayState.villagerStates.entries()) {
+          const memoryState = replayState.memoryStates.get(villagerId) || null;
+          villagerStates.set(
+            villagerId,
+            buildVillagerViewerState(
+              villagerState,
+              memoryState,
+              villagerChangedFields.get(villagerId) || new Set(),
+            ),
+          );
+        }
+        return {
+          villager_states: villagerStates,
+          world_state: buildWorldViewerState(
+            replayState.worldState,
+            targetTime,
+            worldChangedFields,
+          ),
+        };
+      }
+
+      /**
+       * Reconstruct raw replay state at one target time.
+       *
+       * @param {Record<string, unknown>[]} checkpoints
+       * @param {Map<number, Record<string, unknown>[]>} deltaIndex
+       * @param {number} targetTime
+       * @returns {{checkpointTime: number, replayState: {villagerStates: Map<string, Record<string, unknown>>, memoryStates: Map<string, Record<string, unknown>>, worldState: Record<string, unknown>}, villagerChangedFields: Map<string, Set<string>>, worldChangedFields: Set<string>}}
+       */
+      function reconstructRawStateAt(checkpoints, deltaIndex, targetTime) {
+        const checkpoint = checkpoints
+          .filter((entry) => Number(entry.game_time) <= targetTime)
+          .sort((left, right) => Number(right.game_time) - Number(left.game_time))[0];
+        if (checkpoint === undefined) {
+          throw new Error(`No checkpoint exists at or before target time ${targetTime}.`);
+        }
+
+        const checkpointTime = Number(checkpoint.game_time);
+        const replayState = cloneCheckpointState(checkpoint);
+        const changedFields = applyDeltaRange(
+          replayState,
+          deltaIndex,
+          checkpointTime,
+          targetTime,
+        );
+        return {
+          checkpointTime,
+          replayState,
+          villagerChangedFields: changedFields.villagerChangedFields,
+          worldChangedFields: changedFields.worldChangedFields,
+        };
+      }
+
+      /**
+       * Return the stored villager ids ordered by first appearance.
+       *
+       * @param {Record<string, unknown>[]} checkpoints
+       * @returns {string[]}
+       */
+      function listVillagerIds(checkpoints) {
+        const villagerIds = [];
+        const seenIds = new Set();
+        for (const checkpoint of checkpoints) {
+          for (const villagerState of checkpoint.villager_states || []) {
+            const villagerId = String(villagerState.villager_id);
+            if (seenIds.has(villagerId)) {
+              continue;
+            }
+            seenIds.add(villagerId);
+            villagerIds.push(villagerId);
+          }
+          for (const memoryState of checkpoint.memory_state || []) {
+            const villagerId = String(memoryState.villager_id);
+            if (seenIds.has(villagerId)) {
+              continue;
+            }
+            seenIds.add(villagerId);
+            villagerIds.push(villagerId);
+          }
+        }
+        return villagerIds;
+      }
+
+      /**
+       * Load one villager event log.
+       *
+       * @param {string} dataDir
+       * @param {string} villagerId
+       * @returns {Promise<Record<string, unknown>[]>}
+       */
+      async function loadEventLog(dataDir, villagerId) {
+        const normalizedDataDir = normalizeDataDir(dataDir);
+        const response = await fetch(
+          `${normalizedDataDir}/events/${encodeURIComponent(villagerId)}.jsonl`,
+        );
+        return parseJsonLines(await response.text());
+      }
+
+      /**
+       * Return all checkpoint records sorted chronologically.
+       *
+       * @param {string} dataDir
+       * @returns {Promise<Record<string, unknown>[]>}
+       */
+      async function loadAllCheckpoints(dataDir) {
+        const normalizedDataDir = normalizeDataDir(dataDir);
+        const listingUrl = `${normalizedDataDir}/checkpoints/`;
+        const listingResponse = await fetch(listingUrl);
+        const listingHtml = await listingResponse.text();
+        const checkpointUrls = parseCheckpointUrls(listingHtml, listingUrl);
+        const checkpoints = await Promise.all(
+          checkpointUrls.map(async (checkpointUrl) => {
+            const checkpointResponse = await fetch(checkpointUrl);
+            return checkpointResponse.json();
+          }),
+        );
+        checkpoints.sort(
+          (left, right) => Number(left.game_time) - Number(right.game_time),
+        );
+        return checkpoints;
+      }
+
+      /**
+       * Return all delta records grouped by game time.
+       *
+       * @param {string} dataDir
+       * @returns {Promise<Map<number, Record<string, unknown>[]>>}
+       */
+      async function loadDeltaIndex(dataDir) {
+        const normalizedDataDir = normalizeDataDir(dataDir);
+        const response = await fetch(`${normalizedDataDir}/state_deltas.jsonl`);
+        const deltaIndex = new Map();
+        for (const deltaRecord of parseJsonLines(await response.text())) {
+          const gameTime = Number(deltaRecord.game_time);
+          const existingBucket = deltaIndex.get(gameTime) || [];
+          existingBucket.push(deltaRecord);
+          deltaIndex.set(gameTime, existingBucket);
+        }
+        return deltaIndex;
+      }
+
+      /**
+       * Copy viewer-visible state fields onto one session object.
+       *
+       * @param {Record<string, unknown>} session
+       * @param {{villager_states: Map<string, Record<string, unknown>>, world_state: Record<string, unknown>}} projectedState
+       * @param {number} currentGameTime
+       * @returns {Record<string, unknown>}
+       */
+      function assignSessionState(session, projectedState, currentGameTime) {
+        session.current_game_time = currentGameTime;
+        session.villager_states = projectedState.villager_states;
+        session.world_state = projectedState.world_state;
+        return session;
+      }
+
+      /**
+       * Load replay files and initialize one session at the end of the first log.
+       *
+       * @param {string} dataDir
+       * @returns {Promise<Record<string, unknown>>}
+       */
+      async function initSession(dataDir) {
+        const checkpoints = await loadAllCheckpoints(dataDir);
+        const deltaIndex = await loadDeltaIndex(dataDir);
+        const villagerIds = listVillagerIds(checkpoints);
+        if (villagerIds.length === 0) {
+          throw new Error("Cannot initialize viewer session without villagers.");
+        }
+
+        const selectedVillagerId = villagerIds[0];
+        const visibleEvents = await loadEventLog(dataDir, selectedVillagerId);
+        if (visibleEvents.length === 0) {
+          throw new Error(`Villager ${selectedVillagerId} has no event log entries.`);
+        }
+
+        const currentEventIndex = visibleEvents.length - 1;
+        const currentGameTime = Number(visibleEvents[currentEventIndex].game_time);
+        const reconstructedState = reconstructRawStateAt(
+          checkpoints,
+          deltaIndex,
+          currentGameTime,
+        );
+        const session = {
+          selected_villager_id: selectedVillagerId,
+          current_game_time: currentGameTime,
+          villager_states: new Map(),
+          world_state: {},
+          visible_events: visibleEvents,
+          _all_villager_ids: villagerIds,
+          _checkpoints: checkpoints,
+          _current_event_index: currentEventIndex,
+          _data_dir: dataDir,
+          _delta_index: deltaIndex,
+          _event_logs: new Map([[selectedVillagerId, visibleEvents]]),
+          _frozen_villager_views: new Map(),
+          _replay_checkpoint_time: reconstructedState.checkpointTime,
+          _replay_state: reconstructedState.replayState,
+        };
+        return assignSessionState(
+          session,
+          buildViewerProjection(
+            reconstructedState.replayState,
+            currentGameTime,
+            reconstructedState.villagerChangedFields,
+            reconstructedState.worldChangedFields,
+          ),
+          currentGameTime,
+        );
+      }
+
+      /**
+       * Swap the visible log to one villager without changing replay state.
+       *
+       * @param {Record<string, unknown>} session
+       * @param {string} villagerId
+       * @returns {Promise<Record<string, unknown>>}
+       */
+      async function selectVillager(session, villagerId) {
+        const eventLogs = /** @type {Map<string, Record<string, unknown>[]>} */ (
+          session._event_logs
+        );
+        let visibleEvents = eventLogs.get(villagerId);
+        if (visibleEvents === undefined) {
+          visibleEvents = await loadEventLog(String(session._data_dir), villagerId);
+          eventLogs.set(villagerId, visibleEvents);
+        }
+
+        session.selected_villager_id = villagerId;
+        session.visible_events = visibleEvents;
+        session._current_event_index = visibleEvents.findIndex(
+          (eventEntry) => Number(eventEntry.game_time) === session.current_game_time,
+        );
+        if (session._current_event_index < 0) {
+          session._current_event_index = visibleEvents.length - 1;
+        }
+        return session;
+      }
+
+      /**
+       * Move one session to the target visible event.
+       *
+       * @param {Record<string, unknown>} session
+       * @param {number} eventIndex
+       * @returns {Record<string, unknown>}
+       */
+      function scrollToEvent(session, eventIndex) {
+        const visibleEvents = /** @type {Record<string, unknown>[]} */ (
+          session.visible_events
+        );
+        if (eventIndex < 0 || eventIndex >= visibleEvents.length) {
+          throw new Error(`Event index ${eventIndex} is out of bounds.`);
+        }
+
+        const targetTime = Number(visibleEvents[eventIndex].game_time);
+        const currentTime = Number(session.current_game_time);
+        if (targetTime === currentTime) {
+          session._current_event_index = eventIndex;
+          return session;
+        }
+
+        if (targetTime > currentTime) {
+          const replayState = /** @type {{villagerStates: Map<string, Record<string, unknown>>, memoryStates: Map<string, Record<string, unknown>>, worldState: Record<string, unknown>}} */ (
+            session._replay_state
+          );
+          const changedFields = applyDeltaRange(
+            replayState,
+            /** @type {Map<number, Record<string, unknown>[]>} */ (session._delta_index),
+            currentTime,
+            targetTime,
+          );
+          session._current_event_index = eventIndex;
+          return assignSessionState(
+            session,
+            buildViewerProjection(
+              replayState,
+              targetTime,
+              changedFields.villagerChangedFields,
+              changedFields.worldChangedFields,
+            ),
+            targetTime,
+          );
+        }
+
+        const reconstructedState = reconstructRawStateAt(
+          /** @type {Record<string, unknown>[]} */ (session._checkpoints),
+          /** @type {Map<number, Record<string, unknown>[]>} */ (session._delta_index),
+          targetTime,
+        );
+        session._current_event_index = eventIndex;
+        session._replay_checkpoint_time = reconstructedState.checkpointTime;
+        session._replay_state = reconstructedState.replayState;
+        return assignSessionState(
+          session,
+          buildViewerProjection(
+            reconstructedState.replayState,
+            targetTime,
+            reconstructedState.villagerChangedFields,
+            reconstructedState.worldChangedFields,
+          ),
+          targetTime,
+        );
+      }
+
+      /**
+       * Reconstruct living villager and world viewer state at one target time.
+       *
+       * @param {Record<string, unknown>[]} checkpoints
+       * @param {Map<number, Record<string, unknown>[]>} deltaIndex
+       * @param {number} targetTime
+       * @returns {{villager_states: Map<string, Record<string, unknown>>, world_state: Record<string, unknown>}}
+       */
+      function reconstructStateAt(checkpoints, deltaIndex, targetTime) {
+        const reconstructedState = reconstructRawStateAt(
+          checkpoints,
+          deltaIndex,
+          targetTime,
+        );
+        return buildViewerProjection(
+          reconstructedState.replayState,
+          targetTime,
+          reconstructedState.villagerChangedFields,
+          reconstructedState.worldChangedFields,
+        );
+      }
+
+      /**
+       * Return whether DOM APIs are available in the current runtime.
+       *
+       * @returns {boolean}
+       */
+      function canUseDom() {
+        return typeof document !== "undefined" && document !== null;
+      }
+
+      /**
+       * Return one title-cased label from a snake or item key.
+       *
+       * @param {string} rawKey
+       * @returns {string}
+       */
+      function formatLabel(rawKey) {
+        return rawKey
+          .split(/[_\s]+/)
+          .filter((part) => part !== "")
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+          .join(" ");
+      }
+
+      /**
+       * Return one human-readable game timestamp.
+       *
+       * @param {number} gameTime
+       * @returns {string}
+       */
+      function formatGameTime(gameTime) {
+        const safeTime = Math.max(0, Math.floor(gameTime));
+        const day = Math.floor(safeTime / 1440) + 1;
+        const minutesIntoDay = safeTime % 1440;
+        const hour24 = Math.floor(minutesIntoDay / 60);
+        const minute = minutesIntoDay % 60;
+        const meridiem = hour24 >= 12 ? "PM" : "AM";
+        const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+        return `Day ${day}, ${hour12}:${String(minute).padStart(2, "0")} ${meridiem}`;
+      }
+
+      /**
+       * Return one formatted numeric display string.
+       *
+       * @param {number} value
+       * @param {number} decimals
+       * @returns {string}
+       */
+      function formatNumber(value, decimals) {
+        return Number(value).toFixed(decimals);
+      }
+
+      /**
+       * Return one safe numeric value.
+       *
+       * @param {unknown} value
+       * @param {number} fallback
+       * @returns {number}
+       */
+      function asNumber(value, fallback) {
+        return typeof value === "number" ? value : fallback;
+      }
+
+      /**
+       * Clamp one value into an inclusive range.
+       *
+       * @param {number} value
+       * @param {number} minimum
+       * @param {number} maximum
+       * @returns {number}
+       */
+      function clamp(value, minimum, maximum) {
+        return Math.max(minimum, Math.min(value, maximum));
+      }
+
+      /**
+       * Compute one villager health score from raw percentages.
+       *
+       * @param {number} wakefulnessPct
+       * @param {number} satiationPct
+       * @param {number} hydrationPct
+       * @returns {number}
+       */
+      function computeHealthValue(wakefulnessPct, satiationPct, hydrationPct) {
+        const satiationTerm = (32 ** (satiationPct - 1)) - (1 / 32);
+        const health = (
+          Math.max(0.1, wakefulnessPct)
+          * (satiationTerm ** 3)
+          * (hydrationPct ** 3)
+        ) ** (1 / 9);
+        return clamp(health, 0, 1);
+      }
+
+      /**
+       * Compute one villager mood score from scaled components.
+       *
+       * @param {number} socialJoyPct
+       * @param {number} connectednessPct
+       * @param {number} cleanlinessPct
+       * @param {number} baseCleanliness
+       * @param {number} restHoursSince
+       * @returns {number}
+       */
+      function computeMoodValue(
+        socialJoyPct,
+        connectednessPct,
+        cleanlinessPct,
+        baseCleanliness,
+        restHoursSince,
+      ) {
+        const linearTerm =
+          (0.5 * socialJoyPct)
+          + (0.2 * connectednessPct)
+          + (0.2 * cleanlinessPct)
+          + (0.1 * baseCleanliness);
+        const geometricTerm = (
+          (socialJoyPct ** 10)
+          * (connectednessPct ** 4)
+          * (cleanlinessPct ** 4)
+          * (baseCleanliness ** 2)
+        ) ** (1 / 22);
+        const restTerm = (0.3 / 5) * Math.max(0, 5 - restHoursSince);
+        return Math.min(1, (0.5 * linearTerm) + (0.5 * geometricTerm) + restTerm);
+      }
+
+      /**
+       * Return remaining fuel minutes from one world viewer state.
+       *
+       * @param {Record<string, unknown>} worldState
+       * @returns {number}
+       */
+      function computeTotalFuelMinutes(worldState) {
+        const baseStorage = /** @type {Record<string, number>} */ (
+          worldState.base_storage || {}
+        );
+        let total = asNumber(worldState.fire_remaining_minutes, 0);
+        for (const [itemKey, multiplier] of Object.entries(FUEL_MINUTES)) {
+          total += asNumber(baseStorage[itemKey], 0) * multiplier;
+        }
+        return total;
+      }
+
+      /**
+       * Return total base calories represented by current storage.
+       *
+       * @param {Record<string, unknown>} worldState
+       * @returns {number}
+       */
+      function computeBaseCalories(worldState) {
+        const baseStorage = /** @type {Record<string, number>} */ (
+          worldState.base_storage || {}
+        );
+        let total = 0;
+        for (const [itemKey, calories] of Object.entries(FOOD_CALORIES)) {
+          total += asNumber(baseStorage[itemKey], 0) * calories;
+        }
+        return total;
+      }
+
+      /**
+       * Return one derived-stat bundle for rendering.
+       *
+       * @param {Record<string, unknown>} villagerState
+       * @param {Record<string, unknown>} worldState
+       * @param {number} livingVillagerCount
+       * @param {number} currentGameTime
+       * @returns {{wakefulness_pct: number, satiation_pct: number, hydration_pct: number, social_joy_pct: number, connectedness_pct: number, cleanliness_pct: number, base_cleanliness: number, rest_hours_since: number, health: number, mood: number, safety: number, well_being: number}}
+       */
+      function computeDerivedStats(villagerState, worldState, livingVillagerCount, currentGameTime) {
+        const wakefulnessPct = asNumber(villagerState.wakefulness, 0) / 100;
+        const satiationPct = asNumber(villagerState.satiation, 0) / 1800;
+        const hydrationPct = asNumber(villagerState.hydration, 0) / 6000;
+        const socialJoyPct = asNumber(villagerState.social_joy, 0) / 100;
+        const connectednessPct = asNumber(villagerState.connectedness, 0) / 100;
+        const cleanlinessPct = asNumber(villagerState.cleanliness, 0) / 100;
+        const baseCleanliness = Math.max(
+          0,
+          1 - (asNumber(worldState.total_dirtiness, 0) / 100),
+        );
+        const lastRestGameTime =
+          typeof villagerState.last_rest_game_time === "number"
+            ? villagerState.last_rest_game_time
+            : null;
+        const restHoursSince =
+          lastRestGameTime === null
+            ? 999
+            : (currentGameTime - lastRestGameTime) / 60;
+        const health =
+          typeof villagerState.health === "number"
+            ? villagerState.health
+            : computeHealthValue(wakefulnessPct, satiationPct, hydrationPct);
+        const mood =
+          typeof villagerState.mood === "number"
+            ? villagerState.mood
+            : computeMoodValue(
+                socialJoyPct,
+                connectednessPct,
+                cleanlinessPct,
+                baseCleanliness,
+                restHoursSince,
+              );
+        const inventory = /** @type {Record<string, number>} */ (
+          villagerState.inventory || {}
+        );
+        const inventoryCalories =
+          (asNumber(inventory.PEACH, 0) * FOOD_CALORIES.PEACH)
+          + (asNumber(inventory.COOKED_MEAT, 0) * FOOD_CALORIES.COOKED_MEAT);
+        const villagerCount = Math.max(1, livingVillagerCount);
+        const foodSafety =
+          (
+            (inventoryCalories / 2200)
+            + ((1 / villagerCount) * (computeBaseCalories(worldState) / 2200))
+          ) / 5;
+        const fireSafety = (computeTotalFuelMinutes(worldState) / 480) / 5;
+        const safety =
+          typeof villagerState.safety === "number"
+            ? villagerState.safety
+            : (foodSafety + fireSafety) / 2;
+        const wellBeing =
+          typeof villagerState.well_being === "number"
+            ? villagerState.well_being
+            : Math.min(1, ((mood ** 2) * (health ** 3) * Math.max(0.3, safety)) ** (1 / 7));
+        return {
+          wakefulness_pct: wakefulnessPct,
+          satiation_pct: satiationPct,
+          hydration_pct: hydrationPct,
+          social_joy_pct: socialJoyPct,
+          connectedness_pct: connectednessPct,
+          cleanliness_pct: cleanlinessPct,
+          base_cleanliness: baseCleanliness,
+          rest_hours_since: restHoursSince,
+          health,
+          mood,
+          safety,
+          well_being: wellBeing,
+        };
+      }
+
+      /**
+       * Return one authored description for a stat key and normalized value.
+       *
+       * @param {string} statKey
+       * @param {number} normalizedValue
+       * @returns {string}
+       */
+      function getStatDescription(statKey, normalizedValue) {
+        const spec = DESCRIPTION_SPECS[statKey];
+        if (spec === undefined) {
+          return "";
+        }
+        const scaledValue = normalizedValue * spec.scale;
+        let currentText = spec.tiers[0][1];
+        for (const [lowerBound, tierText] of spec.tiers) {
+          if (scaledValue >= lowerBound) {
+            currentText = tierText;
+          }
+        }
+        return currentText;
+      }
+
+      /**
+       * Build the static app shell and return DOM references.
+       *
+       * @returns {Record<string, HTMLElement>}
+       */
+      function createAppShell() {
+        const root = document.getElementById("viewer-root");
+        if (!(root instanceof HTMLElement)) {
+          throw new Error("Viewer root element is missing.");
+        }
+        root.innerHTML = `
+          <main class="shell">
+            <section class="panel scroll-column">
+              <div class="panel-header">
+                <div>
+                  <h1 class="panel-title">Villager Focus</h1>
+                  <p class="panel-subtitle" id="selected-villager-label">Loading…</p>
+                </div>
+                <div class="status-badge" id="villager-life-state">alive</div>
+              </div>
+              <div class="column-body">
+                <div class="selector-row" id="villager-selector"></div>
+                <div class="section">
+                  <h2 class="section-title">Current Time</h2>
+                  <p class="meta-line" id="current-time-label"></p>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Current Action</h2>
+                  <p class="meta-line" id="current-action-text"></p>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Raw Stats</h2>
+                  <div class="stat-grid" id="raw-stat-grid"></div>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Derived Stats</h2>
+                  <div class="stat-grid" id="derived-stat-grid"></div>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Inventory</h2>
+                  <div class="kv-list" id="inventory-list"></div>
+                </div>
+              </div>
+            </section>
+            <section class="panel scroll-column">
+              <div class="panel-header">
+                <div>
+                  <h2 class="panel-title">Event Log</h2>
+                  <p class="panel-subtitle" id="event-log-summary">Loading…</p>
+                </div>
+              </div>
+              <div class="event-log" id="event-log" tabindex="0" aria-label="Event log"></div>
+            </section>
+            <section class="panel scroll-column">
+              <div class="panel-header">
+                <div>
+                  <h2 class="panel-title">World & Memory</h2>
+                  <p class="panel-subtitle">Base status and cognitive state at the current event.</p>
+                </div>
+              </div>
+              <div class="column-body">
+                <div class="section">
+                  <h2 class="section-title">Base Status</h2>
+                  <div class="kv-list" id="world-status-list"></div>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Base Storage</h2>
+                  <div class="kv-list" id="base-storage-list"></div>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Short-Term Memory</h2>
+                  <ul class="memory-list" id="short-term-memory-list"></ul>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Medium-Term Memory</h2>
+                  <ul class="memory-list" id="medium-term-memory-list"></ul>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Long-Term Memory</h2>
+                  <ul class="memory-list" id="long-term-memory-list"></ul>
+                </div>
+                <div class="section">
+                  <h2 class="section-title">Relationships</h2>
+                  <ul class="relationship-list" id="relationship-list"></ul>
+                </div>
+              </div>
+            </section>
+          </main>
+        `;
+        return {
+          root,
+          selectedVillagerLabel: /** @type {HTMLElement} */ (document.getElementById("selected-villager-label")),
+          villagerLifeState: /** @type {HTMLElement} */ (document.getElementById("villager-life-state")),
+          villagerSelector: /** @type {HTMLElement} */ (document.getElementById("villager-selector")),
+          currentTimeLabel: /** @type {HTMLElement} */ (document.getElementById("current-time-label")),
+          currentActionText: /** @type {HTMLElement} */ (document.getElementById("current-action-text")),
+          rawStatGrid: /** @type {HTMLElement} */ (document.getElementById("raw-stat-grid")),
+          derivedStatGrid: /** @type {HTMLElement} */ (document.getElementById("derived-stat-grid")),
+          inventoryList: /** @type {HTMLElement} */ (document.getElementById("inventory-list")),
+          eventLog: /** @type {HTMLElement} */ (document.getElementById("event-log")),
+          eventLogSummary: /** @type {HTMLElement} */ (document.getElementById("event-log-summary")),
+          worldStatusList: /** @type {HTMLElement} */ (document.getElementById("world-status-list")),
+          baseStorageList: /** @type {HTMLElement} */ (document.getElementById("base-storage-list")),
+          shortTermMemoryList: /** @type {HTMLElement} */ (document.getElementById("short-term-memory-list")),
+          mediumTermMemoryList: /** @type {HTMLElement} */ (document.getElementById("medium-term-memory-list")),
+          longTermMemoryList: /** @type {HTMLElement} */ (document.getElementById("long-term-memory-list")),
+          relationshipList: /** @type {HTMLElement} */ (document.getElementById("relationship-list")),
+        };
+      }
+
+      /**
+       * Replace one container with an empty-state block.
+       *
+       * @param {HTMLElement} element
+       * @param {string} message
+       * @returns {void}
+       */
+      function setEmptyState(element, message) {
+        element.innerHTML = `<div class="empty-state">${message}</div>`;
+      }
+
+      /**
+       * Return one selected-villager render bundle.
+       *
+       * @param {Record<string, unknown>} session
+       * @returns {{villagerState: Record<string, unknown> | null, descriptionWorldState: Record<string, unknown>, livingVillagerCount: number, deceased: boolean}}
+       */
+      function getSelectedVillagerView(session) {
+        const selectedVillagerId = String(session.selected_villager_id);
+        const currentVillagerStates = /** @type {Map<string, Record<string, unknown>>} */ (
+          session.villager_states
+        );
+        const activeVillagerState = currentVillagerStates.get(selectedVillagerId) || null;
+        const livingVillagerCount = [...currentVillagerStates.values()].filter(
+          (villagerState) => villagerState.is_alive !== false,
+        ).length;
+        if (activeVillagerState !== null) {
+          return {
+            villagerState: activeVillagerState,
+            descriptionWorldState: /** @type {Record<string, unknown>} */ (session.world_state),
+            livingVillagerCount,
+            deceased: activeVillagerState.is_alive === false,
+          };
+        }
+
+        const frozenViews = /** @type {Map<string, Record<string, unknown>>} */ (
+          session._frozen_villager_views
+        );
+        const cachedView = frozenViews.get(selectedVillagerId);
+        if (cachedView !== undefined) {
+          return {
+            villagerState: /** @type {Record<string, unknown>} */ (cachedView.villager_state),
+            descriptionWorldState: /** @type {Record<string, unknown>} */ (cachedView.world_state),
+            livingVillagerCount: Number(cachedView.living_villager_count),
+            deceased: true,
+          };
+        }
+
+        const eventLogs = /** @type {Map<string, Record<string, unknown>[]>} */ (
+          session._event_logs
+        );
+        const visibleEvents = eventLogs.get(selectedVillagerId) || [];
+        if (visibleEvents.length === 0) {
+          return {
+            villagerState: null,
+            descriptionWorldState: /** @type {Record<string, unknown>} */ (session.world_state),
+            livingVillagerCount,
+            deceased: false,
+          };
+        }
+
+        const frozenTime = Number(visibleEvents[visibleEvents.length - 1].game_time);
+        const frozenProjection = reconstructStateAt(
+          /** @type {Record<string, unknown>[]} */ (session._checkpoints),
+          /** @type {Map<number, Record<string, unknown>[]>} */ (session._delta_index),
+          frozenTime,
+        );
+        const frozenVillagerState =
+          frozenProjection.villager_states.get(selectedVillagerId) || null;
+        if (frozenVillagerState === null) {
+          return {
+            villagerState: null,
+            descriptionWorldState: /** @type {Record<string, unknown>} */ (session.world_state),
+            livingVillagerCount,
+            deceased: false,
+          };
+        }
+        const frozenView = {
+          villager_state: frozenVillagerState,
+          world_state: frozenProjection.world_state,
+          living_villager_count: frozenProjection.villager_states.size,
+        };
+        frozenViews.set(selectedVillagerId, frozenView);
+        return {
+          villagerState: frozenVillagerState,
+          descriptionWorldState: frozenProjection.world_state,
+          livingVillagerCount: frozenProjection.villager_states.size,
+          deceased: true,
+        };
+      }
+
+      /**
+       * Render villager selector controls.
+       *
+       * @param {Record<string, unknown>} session
+       * @returns {void}
+       */
+      function renderVillagerSelector(session) {
+        const dom = APP_STATE.dom;
+        if (dom === null) {
+          return;
+        }
+        dom.villagerSelector.innerHTML = "";
+        const villagerIds = /** @type {string[]} */ (session._all_villager_ids || []);
+        for (const villagerId of villagerIds) {
+          const button = document.createElement("button");
+          button.className = `villager-chip${villagerId === session.selected_villager_id ? " is-selected" : ""}`;
+          button.type = "button";
+          button.textContent = formatLabel(villagerId);
+          button.dataset.villagerId = villagerId;
+          button.addEventListener("click", async () => {
+            const currentSession = APP_STATE.session;
+            if (currentSession === null) {
+              return;
+            }
+            await selectVillager(currentSession, villagerId);
+            renderSession(currentSession, { rerenderLog: true, syncScroll: true });
+          });
+          dom.villagerSelector.appendChild(button);
+        }
+      }
+
+      /**
+       * Build one stat row element.
+       *
+       * @param {string} label
+       * @param {string} valueText
+       * @param {string} description
+       * @param {string} fieldPath
+       * @param {string} rowId
+       * @returns {HTMLElement}
+       */
+      function buildStatRow(label, valueText, description, fieldPath, rowId) {
+        const row = document.createElement("div");
+        row.className = "stat-row";
+        row.dataset.fieldPath = fieldPath;
+        row.id = rowId;
+        row.innerHTML = `
+          <div class="stat-top">
+            <p class="stat-name">${label}</p>
+            <p class="stat-value">${valueText}</p>
+          </div>
+          <p class="stat-description">${description}</p>
+        `;
+        return row;
+      }
+
+      /**
+       * Render the selected villager panel.
+       *
+       * @param {Record<string, unknown>} session
+       * @returns {void}
+       */
+      function renderVillagerPanel(session) {
+        const dom = APP_STATE.dom;
+        if (dom === null) {
+          return;
+        }
+        const view = getSelectedVillagerView(session);
+        const villagerId = String(session.selected_villager_id);
+        dom.selectedVillagerLabel.textContent = formatLabel(villagerId);
+        dom.currentTimeLabel.textContent = formatGameTime(Number(session.current_game_time));
+
+        if (view.villagerState === null) {
+          dom.villagerLifeState.textContent = "unknown";
+          dom.villagerLifeState.className = "status-badge";
+          dom.currentActionText.textContent = "No visible villager state.";
+          setEmptyState(dom.rawStatGrid, "No state is available for the selected villager.");
+          setEmptyState(dom.derivedStatGrid, "No derived stats are available.");
+          setEmptyState(dom.inventoryList, "No inventory data is available.");
+          return;
+        }
+
+        dom.villagerLifeState.textContent = view.deceased ? "deceased" : "alive";
+        dom.villagerLifeState.className = view.deceased
+          ? "status-badge is-deceased"
+          : "status-badge";
+        const currentAction = view.villagerState.current_action;
+        dom.currentActionText.textContent =
+          typeof view.villagerState.current_action_text === "string"
+            ? view.villagerState.current_action_text
+            : currentAction !== null
+              && typeof currentAction === "object"
+              && typeof currentAction.detail === "string"
+              ? `${formatLabel(String(currentAction.category || "action"))}: ${currentAction.detail}`
+              : MISSING_VALUE_TEXT;
+
+        const derivedStats = computeDerivedStats(
+          view.villagerState,
+          view.descriptionWorldState,
+          view.livingVillagerCount,
+          view.deceased
+            ? Number(
+                /** @type {Map<string, Record<string, unknown>[]>} */ (
+                  session._event_logs
+                ).get(villagerId)?.slice(-1)[0]?.game_time || session.current_game_time,
+              )
+            : Number(session.current_game_time),
+        );
+
+        dom.rawStatGrid.innerHTML = "";
+        for (const spec of RAW_STAT_SPECS) {
+          const rawValue = asNumber(view.villagerState[spec.key], 0);
+          const description = getStatDescription(
+            spec.key,
+            derivedStats[`${spec.key}_pct`],
+          );
+          dom.rawStatGrid.appendChild(
+            buildStatRow(
+              spec.label,
+              formatNumber(rawValue, spec.decimals),
+              description,
+              spec.key,
+              `stat-${spec.key}`,
+            ),
+          );
+        }
+
+        dom.derivedStatGrid.innerHTML = "";
+        for (const spec of DERIVED_STAT_SPECS) {
+          const value = asNumber(
+            spec.key in view.villagerState ? view.villagerState[spec.key] : derivedStats[spec.key],
+            derivedStats[spec.key],
+          );
+          dom.derivedStatGrid.appendChild(
+            buildStatRow(
+              spec.label,
+              formatNumber(value, spec.decimals),
+              getStatDescription(spec.key, value),
+              spec.key,
+              `stat-${spec.key}`,
+            ),
+          );
+        }
+
+        const inventory = /** @type {Record<string, number>} */ (
+          view.villagerState.inventory || {}
+        );
+        dom.inventoryList.innerHTML = "";
+        const inventoryEntries = Object.entries(inventory).sort(([left], [right]) =>
+          left.localeCompare(right),
+        );
+        if (inventoryEntries.length === 0) {
+          setEmptyState(dom.inventoryList, "Inventory is empty.");
+        } else {
+          for (const [itemKey, quantity] of inventoryEntries) {
+            const row = document.createElement("div");
+            row.className = "kv-row";
+            row.dataset.fieldPath = itemKey;
+            row.id = `inventory-${itemKey}`;
+            row.innerHTML = `
+              <div class="kv-top">
+                <p class="kv-name">${itemKey}</p>
+                <p class="kv-value">${quantity}</p>
+              </div>
+              <p class="kv-description">${formatLabel(itemKey)}</p>
+            `;
+            dom.inventoryList.appendChild(row);
+          }
+        }
+      }
+
+      /**
+       * Build one world key-value row.
+       *
+       * @param {string} label
+       * @param {string} valueText
+       * @param {string} description
+       * @param {string} fieldPath
+       * @param {string} rowId
+       * @returns {HTMLElement}
+       */
+      function buildKvRow(label, valueText, description, fieldPath, rowId) {
+        const row = document.createElement("div");
+        row.className = "kv-row";
+        row.dataset.fieldPath = fieldPath;
+        row.id = rowId;
+        row.innerHTML = `
+          <div class="kv-top">
+            <p class="kv-name">${label}</p>
+            <p class="kv-value">${valueText}</p>
+          </div>
+          <p class="kv-description">${description}</p>
+        `;
+        return row;
+      }
+
+      /**
+       * Render the world and storage panels.
+       *
+       * @param {Record<string, unknown>} session
+       * @returns {void}
+       */
+      function renderWorldPanel(session) {
+        const dom = APP_STATE.dom;
+        if (dom === null) {
+          return;
+        }
+        const worldState = /** @type {Record<string, unknown>} */ (session.world_state);
+        dom.worldStatusList.innerHTML = "";
+        const statusRows = [
+          buildKvRow(
+            "Water Supply",
+            `${formatNumber(asNumber(worldState.water_supply_liters, 0), 0)} L`,
+            `${formatNumber(asNumber(worldState.water_supply_ml, 0), 0)} mL available`,
+            "water_supply_liters",
+            "world-water-supply",
+          ),
+          buildKvRow(
+            "Fire",
+            Boolean(worldState.fire_lit) ? "Lit" : "Unlit",
+            `Remaining burn time: ${formatNumber(asNumber(worldState.fire_remaining_minutes, 0), 0)} minutes`,
+            "fire.lit",
+            "world-fire-status",
+          ),
+          buildKvRow(
+            "Total Dirtiness",
+            formatNumber(asNumber(worldState.total_dirtiness, 0), 0),
+            "Combined camp dirtiness across all tracked sources.",
+            "total_dirtiness",
+            "world-total-dirtiness",
+          ),
+          buildKvRow(
+            "Placed Resting Spots",
+            formatNumber(
+              Object.keys(
+                /** @type {Record<string, string>} */ (
+                  worldState.placed_resting_spots || {}
+                ),
+              ).length,
+              0,
+            ),
+            Object.entries(
+              /** @type {Record<string, string>} */ (
+                worldState.placed_resting_spots || {}
+              ),
+            )
+              .map(([villagerId, spotType]) => `${formatLabel(villagerId)}: ${formatLabel(spotType)}`)
+              .join(", ") || "No resting spots placed.",
+            "placed_resting_spots",
+            "world-resting-spots",
+          ),
+          buildKvRow(
+            "Live Carcasses",
+            formatNumber(asNumber(worldState.live_carcass_count, 0), 0),
+            "Count of carcasses still present in the world.",
+            "live_carcass_count",
+            "world-live-carcasses",
+          ),
+        ];
+        for (const row of statusRows) {
+          dom.worldStatusList.appendChild(row);
+        }
+
+        const baseStorage = /** @type {Record<string, number>} */ (
+          worldState.base_storage || {}
+        );
+        dom.baseStorageList.innerHTML = "";
+        const storageEntries = Object.entries(baseStorage).sort(([left], [right]) =>
+          left.localeCompare(right),
+        );
+        if (storageEntries.length === 0) {
+          setEmptyState(dom.baseStorageList, "Base storage is empty.");
+          return;
+        }
+        for (const [itemKey, quantity] of storageEntries) {
+          dom.baseStorageList.appendChild(
+            buildKvRow(
+              itemKey,
+              formatNumber(quantity, 0),
+              formatLabel(itemKey),
+              `base_storage.${itemKey}`,
+              `base-storage-${itemKey}`,
+            ),
+          );
+        }
+      }
+
+      /**
+       * Render one memory list or an empty-state message.
+       *
+       * @param {HTMLElement} element
+       * @param {string[]} memoryTexts
+       * @returns {void}
+       */
+      function renderMemoryList(element, memoryTexts) {
+        element.innerHTML = "";
+        if (memoryTexts.length === 0) {
+          setEmptyState(element, "No memories captured at this tier.");
+          return;
+        }
+        for (const memoryText of memoryTexts) {
+          const item = document.createElement("li");
+          item.className = "memory-item";
+          item.innerHTML = `
+            <p class="memory-heading">Memory</p>
+            <p class="memory-text">${memoryText}</p>
+          `;
+          element.appendChild(item);
+        }
+      }
+
+      /**
+       * Render memory and relationship panels for the selected villager.
+       *
+       * @param {Record<string, unknown>} session
+       * @returns {void}
+       */
+      function renderMemoryAndRelationshipPanels(session) {
+        const dom = APP_STATE.dom;
+        if (dom === null) {
+          return;
+        }
+        const view = getSelectedVillagerView(session);
+        if (view.villagerState === null) {
+          setEmptyState(dom.shortTermMemoryList, "No memory data is available.");
+          setEmptyState(dom.mediumTermMemoryList, "No memory data is available.");
+          setEmptyState(dom.longTermMemoryList, "No memory data is available.");
+          setEmptyState(dom.relationshipList, "No relationship data is available.");
+          return;
+        }
+        renderMemoryList(
+          dom.shortTermMemoryList,
+          /** @type {string[]} */ (view.villagerState.short_term_memory_texts || []),
+        );
+        renderMemoryList(
+          dom.mediumTermMemoryList,
+          /** @type {string[]} */ (view.villagerState.medium_term_memory_texts || []),
+        );
+        renderMemoryList(
+          dom.longTermMemoryList,
+          /** @type {string[]} */ (view.villagerState.long_term_memory_texts || []),
+        );
+
+        const relationshipDescriptions = /** @type {Record<string, string>} */ (
+          view.villagerState.relationship_descriptions || {}
+        );
+        const recentImpressions = /** @type {Record<string, string[]>} */ (
+          view.villagerState.recent_impressions || {}
+        );
+        dom.relationshipList.innerHTML = "";
+        const villagerIds = /** @type {string[]} */ (session._all_villager_ids || []);
+        const otherVillagers = villagerIds.filter(
+          (villagerId) => villagerId !== session.selected_villager_id,
+        );
+        if (otherVillagers.length === 0) {
+          setEmptyState(dom.relationshipList, "No other villagers are present.");
+          return;
+        }
+        for (const otherVillagerId of otherVillagers) {
+          const relationshipCard = document.createElement("li");
+          relationshipCard.className = "relationship-card";
+          relationshipCard.id = `relationship-${otherVillagerId}`;
+          relationshipCard.innerHTML = `
+            <p class="relationship-name">${formatLabel(otherVillagerId)}</p>
+            <p class="relationship-text">${
+              relationshipDescriptions[otherVillagerId] || "No relationship description recorded."
+            }</p>
+          `;
+          const impressionList = document.createElement("ul");
+          impressionList.className = "impression-list";
+          const impressions = recentImpressions[otherVillagerId] || [];
+          if (impressions.length === 0) {
+            const emptyItem = document.createElement("li");
+            emptyItem.className = "impression-item";
+            emptyItem.textContent = "No recent impressions recorded.";
+            impressionList.appendChild(emptyItem);
+          } else {
+            for (const impressionText of impressions) {
+              const impressionItem = document.createElement("li");
+              impressionItem.className = "impression-item";
+              impressionItem.textContent = impressionText;
+              impressionList.appendChild(impressionItem);
+            }
+          }
+          relationshipCard.appendChild(impressionList);
+          dom.relationshipList.appendChild(relationshipCard);
+        }
+      }
+
+      /**
+       * Render the currently selected event log.
+       *
+       * @param {Record<string, unknown>} session
+       * @param {boolean} syncScroll
+       * @returns {void}
+       */
+      function renderEventLog(session, syncScroll) {
+        const dom = APP_STATE.dom;
+        if (dom === null) {
+          return;
+        }
+        const visibleEvents = /** @type {Record<string, unknown>[]} */ (session.visible_events);
+        dom.eventLog.innerHTML = "";
+        visibleEvents.forEach((eventEntry, index) => {
+          const entry = document.createElement("article");
+          entry.className = "event-entry";
+          entry.dataset.eventIndex = String(index);
+          entry.dataset.gameTime = String(eventEntry.game_time);
+          entry.id = `event-entry-${index}`;
+          entry.innerHTML = `
+            <span class="event-timestamp">${formatGameTime(Number(eventEntry.game_time))}</span>
+            <p class="event-text">${String(eventEntry.text)}</p>
+          `;
+          entry.addEventListener("click", () => {
+            const currentSession = APP_STATE.session;
+            if (currentSession === null) {
+              return;
+            }
+            scrollToEvent(currentSession, index);
+            renderSession(currentSession, { rerenderLog: false, syncScroll: true });
+          });
+          dom.eventLog.appendChild(entry);
+        });
+        dom.eventLogSummary.textContent = `${visibleEvents.length} visible events for ${formatLabel(String(session.selected_villager_id))}.`;
+        APP_STATE.lastRenderedLogVillagerId = String(session.selected_villager_id);
+        updateActiveEvent(session);
+        if (syncScroll) {
+          syncEventScrollPosition(session);
+        }
+      }
+
+      /**
+       * Update the active event class without rebuilding the log.
+       *
+       * @param {Record<string, unknown>} session
+       * @returns {void}
+       */
+      function updateActiveEvent(session) {
+        const dom = APP_STATE.dom;
+        if (dom === null) {
+          return;
+        }
+        const activeIndex = Number(session._current_event_index);
+        for (const node of dom.eventLog.querySelectorAll(".event-entry")) {
+          if (!(node instanceof HTMLElement)) {
+            continue;
+          }
+          node.classList.toggle("is-active", Number(node.dataset.eventIndex) === activeIndex);
+        }
+      }
+
+      /**
+       * Sync the event-log scroll position to the current active entry.
+       *
+       * @param {Record<string, unknown>} session
+       * @returns {void}
+       */
+      function syncEventScrollPosition(session) {
+        const dom = APP_STATE.dom;
+        if (dom === null) {
+          return;
+        }
+        const activeEntry = dom.eventLog.querySelector(
+          `[data-event-index="${String(session._current_event_index)}"]`,
+        );
+        if (!(activeEntry instanceof HTMLElement)) {
+          return;
+        }
+        APP_STATE.suppressScrollSync = true;
+        activeEntry.scrollIntoView({ block: "center" });
+        globalScope.setTimeout(() => {
+          APP_STATE.suppressScrollSync = false;
+        }, 0);
+      }
+
+      /**
+       * Apply visible field-change highlights for the current session state.
+       *
+       * @param {Record<string, unknown>} session
+       * @returns {void}
+       */
+      function updateHighlights(session) {
+        const dom = APP_STATE.dom;
+        if (dom === null) {
+          return;
+        }
+        for (const node of document.querySelectorAll("[data-field-path]")) {
+          if (node instanceof HTMLElement) {
+            node.classList.remove("field-highlight");
+          }
+        }
+        const view = getSelectedVillagerView(session);
+        const villagerChangedFields =
+          view.deceased || view.villagerState === null
+            ? new Set()
+            : /** @type {Set<string>} */ (view.villagerState.changed_fields || new Set());
+        const worldChangedFields = /** @type {Set<string>} */ (
+          session.world_state.changed_fields || new Set()
+        );
+        for (const fieldPath of villagerChangedFields) {
+          for (const node of document.querySelectorAll(`[data-field-path="${CSS.escape(fieldPath)}"]`)) {
+            if (node instanceof HTMLElement) {
+              node.classList.add("field-highlight");
+            }
+          }
+        }
+        for (const fieldPath of worldChangedFields) {
+          for (const node of document.querySelectorAll(`[data-field-path="${CSS.escape(fieldPath)}"]`)) {
+            if (node instanceof HTMLElement) {
+              node.classList.add("field-highlight");
+            }
+          }
+        }
+      }
+
+      /**
+       * Re-render session-backed panels.
+       *
+       * @param {Record<string, unknown>} session
+       * @param {{rerenderLog?: boolean, syncScroll?: boolean}} [options]
+       * @returns {Record<string, unknown>}
+       */
+      function renderSession(session, options) {
+        const nextOptions = options || {};
+        renderVillagerSelector(session);
+        renderVillagerPanel(session);
+        renderWorldPanel(session);
+        renderMemoryAndRelationshipPanels(session);
+        if (
+          nextOptions.rerenderLog
+          || APP_STATE.lastRenderedLogVillagerId !== String(session.selected_villager_id)
+        ) {
+          renderEventLog(session, Boolean(nextOptions.syncScroll));
+        } else {
+          updateActiveEvent(session);
+          if (nextOptions.syncScroll) {
+            syncEventScrollPosition(session);
+          }
+        }
+        updateHighlights(session);
+        return session;
+      }
+
+      /**
+       * Return the event index nearest the top of the visible log viewport.
+       *
+       * @param {HTMLElement} eventLog
+       * @returns {number}
+       */
+      function getClosestVisibleEventIndex(eventLog) {
+        const entries = [...eventLog.querySelectorAll(".event-entry")].filter(
+          (node) => node instanceof HTMLElement,
+        );
+        if (entries.length === 0) {
+          return -1;
+        }
+        const containerRect = eventLog.getBoundingClientRect();
+        let bestIndex = -1;
+        let bestDistance = Number.POSITIVE_INFINITY;
+        for (const entry of entries) {
+          const rect = entry.getBoundingClientRect();
+          const distance = Math.abs(rect.top - containerRect.top - 12);
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIndex = Number(entry.dataset.eventIndex);
+          }
+        }
+        return bestIndex;
+      }
+
+      /**
+       * Attach DOM event listeners after the app shell is created.
+       *
+       * @returns {void}
+       */
+      function attachDomEvents() {
+        const dom = APP_STATE.dom;
+        if (dom === null) {
+          return;
+        }
+        dom.eventLog.addEventListener("scroll", () => {
+          if (APP_STATE.suppressScrollSync) {
+            return;
+          }
+          const session = APP_STATE.session;
+          if (session === null) {
+            return;
+          }
+          const eventIndex = getClosestVisibleEventIndex(dom.eventLog);
+          if (eventIndex < 0 || eventIndex === Number(session._current_event_index)) {
+            return;
+          }
+          scrollToEvent(session, eventIndex);
+          renderSession(session, { rerenderLog: false, syncScroll: false });
+        });
+      }
+
+      /**
+       * Boot the standalone UI into the DOM.
+       *
+       * @param {string} dataDir
+       * @returns {Promise<Record<string, unknown>>}
+       */
+      async function mountViewer(dataDir) {
+        APP_STATE.dom = createAppShell();
+        attachDomEvents();
+        const session = await initSession(dataDir);
+        APP_STATE.session = session;
+        renderSession(session, { rerenderLog: true, syncScroll: true });
+        return session;
+      }
+
+      /**
+       * Render one loading error into the DOM.
+       *
+       * @param {unknown} error
+       * @returns {void}
+       */
+      function renderError(error) {
+        if (!canUseDom()) {
+          return;
+        }
+        const root = document.getElementById("viewer-root");
+        if (!(root instanceof HTMLElement)) {
+          return;
+        }
+        root.innerHTML = `<div class="error">${String(error instanceof Error ? error.message : error)}</div>`;
+      }
+
+      /**
+       * Boot the viewer automatically from the current URL if configured.
+       *
+       * @returns {Promise<Record<string, unknown> | null>}
+       */
+      async function autoMountFromLocation() {
+        if (!canUseDom() || typeof globalScope.location === "undefined") {
+          return null;
+        }
+        const params = new URLSearchParams(globalScope.location.search);
+        const dataDir = params.get("dataDir") || params.get("data_dir");
+        if (dataDir === null || dataDir === "") {
+          return null;
+        }
+        return mountViewer(dataDir);
+      }
+
+      globalScope.villmageObservability = {
+        initSession,
+        loadAllCheckpoints,
+        loadDeltaIndex,
+        reconstructStateAt,
+        scrollToEvent,
+        selectVillager,
+        renderSession,
+        mountViewer,
+        formatGameTime,
+      };
+
+      globalScope.villmageObservabilityReady = autoMountFromLocation().catch((error) => {
+        renderError(error);
+        throw error;
+      });
+    })(globalThis);
+  </script>
+</body>
+</html>
