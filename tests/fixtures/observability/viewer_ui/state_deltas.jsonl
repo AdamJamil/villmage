@@ -1,0 +1,6 @@
+{"game_time":400,"kind":1,"villager_id":"aldric","changes":[{"field":"wakefulness","old_value":"72","new_value":"35"}]}
+{"game_time":470,"kind":4,"villager_id":"aldric","memory_kind":"medium_term","content":"He keeps replaying the near miss."}
+{"game_time":520,"kind":1,"villager_id":"maela","changes":[{"field":"wakefulness","old_value":"58","new_value":"4"},{"field":"hydration","old_value":"2600","new_value":"600"},{"field":"is_alive","old_value":"true","new_value":"false"}]}
+{"game_time":560,"kind":3,"changes":[{"field":"base_storage.PEACH","old_value":"2","new_value":"5"}]}
+{"game_time":610,"kind":1,"villager_id":"aldric","changes":[{"field":"hydration","old_value":"4100","new_value":"3800"},{"field":"social_joy","old_value":"82","new_value":"79"}]}
+{"game_time":610,"kind":1,"villager_id":"sewalt","changes":[{"field":"social_joy","old_value":"38","new_value":"42"}]}
