@@ -1,0 +1,211 @@
+# pyre-strict
+
+"""Stateful event-log storage for the memory system subsystem."""
+
+from __future__ import annotations
+
+from dataclasses import asdict
+import json
+import os
+from pathlib import Path
+from typing import TextIO
+
+from llm_client.client import LLMClient
+from memory_system.types import (
+    EventLogEntry,
+    EventType,
+    MemoryEntry,
+    MemorySnapshot,
+    RelationshipRecord,
+    VillagerId,
+    VillagerMemoryContext,
+)
+
+
+_UNKNOWN_RELATIONSHIP_DESCRIPTION = "I don't know anything about them."
+
+
+class MemorySystem:
+    """Own per-villager event-log state and the persistent JSONL log file."""
+
+    _active_context_log: dict[VillagerId, list[EventLogEntry]]
+    _short_term_memories: dict[VillagerId, list[MemoryEntry]]
+    _medium_term_memories: dict[VillagerId, list[MemoryEntry]]
+    _long_term_memories: dict[VillagerId, list[MemoryEntry]]
+    _relationships: dict[VillagerId, dict[VillagerId, RelationshipRecord]]
+    _last_long_term_compaction_day: int
+    _llm_client: LLMClient
+    _event_log_file: TextIO
+
+    def __init__(
+        self,
+        villager_ids: list[VillagerId],
+        llm_client: LLMClient,
+        event_log_path: Path,
+    ) -> None:
+        """Initialize empty per-villager structures and open the persistent event log."""
+
+        self._llm_client = llm_client
+        self._active_context_log = {villager_id: [] for villager_id in villager_ids}
+        self._short_term_memories = {villager_id: [] for villager_id in villager_ids}
+        self._medium_term_memories = {villager_id: [] for villager_id in villager_ids}
+        self._long_term_memories = {villager_id: [] for villager_id in villager_ids}
+        self._relationships = {
+            villager_id: {
+                other_villager_id: RelationshipRecord(
+                    description=_UNKNOWN_RELATIONSHIP_DESCRIPTION,
+                    recent_impressions=[],
+                )
+                for other_villager_id in villager_ids
+                if other_villager_id != villager_id
+            }
+            for villager_id in villager_ids
+        }
+        self._last_long_term_compaction_day = 0
+
+        event_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._event_log_file = event_log_path.open("a", encoding="utf-8")
+
+    def append_event(self, villager_id: VillagerId, entry: EventLogEntry) -> None:
+        """Append one event in memory and durably write it as a JSONL line."""
+
+        self._active_context_log[villager_id].append(entry)
+        self._event_log_file.write(json.dumps(asdict(entry)) + "\n")
+        self._event_log_file.flush()
+        os.fsync(self._event_log_file.fileno())
+
+    def append_thought(self, villager_id: VillagerId, game_time: int, text: str) -> None:
+        """Append one THOUGHT event through the main append_event code path."""
+
+        self.append_event(
+            villager_id,
+            EventLogEntry(game_time=game_time, type=EventType.THOUGHT, text=text),
+        )
+
+    def write_impressions(
+        self,
+        speaker_id: VillagerId,
+        subject_id: VillagerId,
+        impression: str,
+        desc_update: str | None,
+    ) -> None:
+        """Append one impression and optionally replace the relationship description."""
+
+        relationship = self._relationships[speaker_id][subject_id]
+        relationship.recent_impressions.append(impression)
+        if len(relationship.recent_impressions) > 3:
+            relationship.recent_impressions.pop(0)
+        if desc_update is not None:
+            relationship.description = desc_update
+
+    @staticmethod
+    def _copy_memory_map(
+        memory_map: dict[VillagerId, list[MemoryEntry]],
+    ) -> dict[VillagerId, list[MemoryEntry]]:
+        """Return a per-villager copy of one memory-tier map."""
+
+        return {
+            villager_id: list(entries) for villager_id, entries in memory_map.items()
+        }
+
+    @staticmethod
+    def _copy_event_log_map(
+        event_log_map: dict[VillagerId, list[EventLogEntry]],
+    ) -> dict[VillagerId, list[EventLogEntry]]:
+        """Return a per-villager copy of one event-log map."""
+
+        return {
+            villager_id: list(entries) for villager_id, entries in event_log_map.items()
+        }
+
+    @staticmethod
+    def _copy_relationship_record(record: RelationshipRecord) -> RelationshipRecord:
+        """Return a deep copy of one relationship record."""
+
+        return RelationshipRecord(
+            description=record.description,
+            recent_impressions=list(record.recent_impressions),
+        )
+
+    @classmethod
+    def _copy_relationship_map(
+        cls,
+        relationship_map: dict[VillagerId, dict[VillagerId, RelationshipRecord]],
+    ) -> dict[VillagerId, dict[VillagerId, RelationshipRecord]]:
+        """Return a deep copy of the full directed relationship map."""
+
+        return {
+            speaker_id: {
+                subject_id: cls._copy_relationship_record(record)
+                for subject_id, record in subject_records.items()
+            }
+            for speaker_id, subject_records in relationship_map.items()
+        }
+
+    def trigger_snapshot(self) -> MemorySnapshot:
+        """Serialize all in-memory state into a stable point-in-time snapshot."""
+
+        return MemorySnapshot(
+            active_context_log=self._copy_event_log_map(self._active_context_log),
+            short_term_memories=self._copy_memory_map(self._short_term_memories),
+            medium_term_memories=self._copy_memory_map(self._medium_term_memories),
+            long_term_memories=self._copy_memory_map(self._long_term_memories),
+            relationships=self._copy_relationship_map(self._relationships),
+            last_long_term_compaction_day=self._last_long_term_compaction_day,
+        )
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: MemorySnapshot,
+        llm_client: LLMClient,
+        event_log_path: Path,
+    ) -> MemorySystem:
+        """Reconstruct a MemorySystem from a previously captured snapshot."""
+
+        if not event_log_path.exists():
+            raise FileNotFoundError(event_log_path)
+
+        villager_ids = list(snapshot.active_context_log.keys())
+        memory_system = cls.__new__(cls)
+        memory_system._llm_client = llm_client
+        memory_system._active_context_log = cls._copy_event_log_map(
+            snapshot.active_context_log
+        )
+        memory_system._short_term_memories = cls._copy_memory_map(
+            snapshot.short_term_memories
+        )
+        memory_system._medium_term_memories = cls._copy_memory_map(
+            snapshot.medium_term_memories
+        )
+        memory_system._long_term_memories = cls._copy_memory_map(
+            snapshot.long_term_memories
+        )
+        memory_system._relationships = cls._copy_relationship_map(
+            snapshot.relationships
+        )
+        memory_system._last_long_term_compaction_day = (
+            snapshot.last_long_term_compaction_day
+        )
+        memory_system._event_log_file = event_log_path.open("a", encoding="utf-8")
+        for villager_id in villager_ids:
+            memory_system._active_context_log.setdefault(villager_id, [])
+            memory_system._short_term_memories.setdefault(villager_id, [])
+            memory_system._medium_term_memories.setdefault(villager_id, [])
+            memory_system._long_term_memories.setdefault(villager_id, [])
+            memory_system._relationships.setdefault(villager_id, {})
+        return memory_system
+
+    def get_memory_context(self, villager_id: VillagerId) -> VillagerMemoryContext:
+        """Assemble the current read-only memory context for one villager."""
+
+        return VillagerMemoryContext(
+            long_term_memories=list(self._long_term_memories[villager_id]),
+            medium_term_memories=list(self._medium_term_memories[villager_id]),
+            short_term_memories=list(self._short_term_memories[villager_id]),
+            active_context_log=list(self._active_context_log[villager_id]),
+            relationships={
+                other_villager_id: self._copy_relationship_record(record)
+                for other_villager_id, record in self._relationships[villager_id].items()
+            },
+        )
