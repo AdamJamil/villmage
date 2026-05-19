@@ -1,0 +1,1 @@
+Five files, no cycles: `types.py` has no intra-package imports; `timing.py` imports only from `types.py`; `eligibility.py` imports from `types.py` and `timing.py`; `effects.py` imports from `types.py` and `timing.py`; `api.py` imports from all four. All eight core objects are assigned to `types.py` with docstrings that describe what each is without explaining its internal logic.
