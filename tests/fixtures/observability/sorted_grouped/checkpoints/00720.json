@@ -1,0 +1,56 @@
+{
+  "game_time": 720,
+  "villager_states": [
+    {
+      "villager_id": "aldric",
+      "wakefulness": 85,
+      "satiation": 1550,
+      "hydration": 4800,
+      "social_joy": 40,
+      "connectedness": 60,
+      "cleanliness": 75,
+      "inventory": {
+        "PEACH": 1
+      },
+      "sleep_spot_claim": null,
+      "crafting_in_progress": null,
+      "cooking_paused": false,
+      "current_action": null,
+      "last_rest_game_time": 300,
+      "awake_minutes_since_compaction": 420,
+      "is_alive": true
+    }
+  ],
+  "world_state": {
+    "base_storage": {
+      "PEACH": 3
+    },
+    "water_supply_ml": 4500,
+    "fire": {
+      "lit": false,
+      "fuel_queue": [],
+      "extinction_timestamp": null
+    },
+    "dirtiness_counts": {},
+    "placed_resting_spots": {},
+    "live_carcasses": [],
+    "next_carcass_id": 1
+  },
+  "memory_state": [
+    {
+      "villager_id": "aldric",
+      "short_term_memories": [],
+      "medium_term_memories": [],
+      "long_term_memories": [],
+      "active_context_log": [],
+      "relationships": {},
+      "last_long_term_compaction_day": 0
+    }
+  ],
+  "autobalance": {
+    "exploration_yield_scale": 1.0,
+    "satiation_restore_scale": 1.0,
+    "hydration_restore_scale": 1.0
+  },
+  "event_heap": []
+}
