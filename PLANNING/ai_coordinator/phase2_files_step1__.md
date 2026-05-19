@@ -1,0 +1,5 @@
+Done. Two sections appended to `impl/ai_coordinator.md`:
+
+**File Hierarchy** — Finalizes the 4-file structure (`types.py`, `prompts.py`, `parser.py`, `coordinator.py`) with module-level docstrings that tell a new dev what lives in each file, what it imports, and what it doesn't do. The dependency direction is acyclic: `coordinator.py` → `prompts.py`/`parser.py` → `types.py` → external deps only.
+
+**Object-to-File Assignments** — All 13 structs/enums from the Core Objects section are assigned to `types.py` with one-paragraph docstrings. Each docstring covers what the object *is* and the one non-obvious usage constraint (e.g., `ConversationSnapshot` history is pre-filtered by caller; `TradeItemSpec` uses resolved `ItemType` not raw strings; absent `thoughts` key means no Memory System write).
